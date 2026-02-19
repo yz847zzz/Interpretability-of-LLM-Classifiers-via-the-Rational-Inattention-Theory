@@ -1,0 +1,12 @@
+File_P,Filename,Gemini_P11,Gemini_P00,Gemini_Pc
+0.0,traindataset_p_00_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.815,0.7050000000000001,0.76
+0.1,traindataset_p_01_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.715,0.735,0.725
+0.2,traindataset_p_02_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.665,0.76,0.7125
+0.3,traindataset_p_03_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.61,0.745,0.6775
+0.4,traindataset_p_04_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.54,0.755,0.6475
+0.5,traindataset_p_05_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.505,0.8200000000000001,0.6625000000000001
+0.6,traindataset_p_06_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.41,0.8200000000000001,0.615
+0.7,traindataset_p_07_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.4,0.86,0.63
+0.8,traindataset_p_08_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.315,0.755,0.535
+0.9,traindataset_p_09_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.26,0.86,0.56
+1.0,traindataset_p_10_sampled400_EXTREME_MIX_NOISE_gemini_result.csv,0.38,0.835,0.6074999999999999

@@ -1,0 +1,12 @@
+File_P,Filename,gpt_3_5_turbo_P11,gpt_3_5_turbo_P00,gpt_3_5_turbo_Pc
+0.0,traindataset_p_00_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,1.0,0.5900000000000001,0.795
+0.1,traindataset_p_01_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,1.0,0.565,0.7825
+0.2,traindataset_p_02_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.99,0.5900000000000001,0.79
+0.3,traindataset_p_03_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.98,0.5,0.74
+0.4,traindataset_p_04_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.99,0.5800000000000001,0.785
+0.5,traindataset_p_05_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.995,0.53,0.7625
+0.6,traindataset_p_06_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.985,0.525,0.755
+0.7,traindataset_p_07_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.99,0.56,0.775
+0.8,traindataset_p_08_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.98,0.51,0.745
+0.9,traindataset_p_09_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.99,0.45999999999999996,0.725
+1.0,traindataset_p_10_sampled400_EXTREME_ZERO_TOL_gpt_3_5_turbo.csv,0.995,0.595,0.7949999999999999
