@@ -1,5 +1,9 @@
 # LLM Classification Performance Under Text Noise
 
+This repository provides the data generation and evaluation pipeline for:
+
+> Y. Zhao, A. Abdi, "Interpretability of LLM Classifiers via the Rational Inattention Theory with Application to Hate Speech Detection," *ACL Student Research Workshop*, 2026.
+
 This repository contains code to reproduce the experiments in our paper on modelling LLM response behaviour under degraded (noisy) input conditions using Response Inhibition (RI) theory.
 
 The pipeline classifies hate-speech texts at 11 noise levels (p = 0.0 to 1.0) using GPT and/or Gemini, then computes sensitivity (P1a), specificity (P1b), overall accuracy (Pc), and mutual information I(Y;A).
