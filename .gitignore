@@ -1,0 +1,15 @@
+# API keys — never commit this
+.env
+
+# Generated data — too large for git
+Dataset/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
