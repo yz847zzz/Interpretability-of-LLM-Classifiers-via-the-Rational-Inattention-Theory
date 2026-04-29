@@ -1,38 +1,47 @@
 """
-Fit the Rational Inattention (RI) model to observed LLM classification metrics.
+Fit the extended Rational Inattention (RI) model to observed LLM classification
+metrics, and run the NIAS (No Improving Action Switches) test.
 
-Reads the summary CSVs produced by compute_metrics.py and fits the RI model
-parameters to the observed Pc (accuracy) curve across noise levels p = 0..1.
+Reference
+---------
+Y. Zhao, A. Abdi, "Interpretability of LLM Classifiers via the Rational
+Inattention Theory with Application to Hate Speech Detection,"
+ACL Student Research Workshop, 2026.
 
-RI model
---------
-Noise-to-channel mapping:
-    q(p; alpha, beta) = clip(alpha * p^beta, 0, 1)
+Model (Eqs. 4-6 in the paper)
+------------------------------
+Noise-to-channel mapping  (Eq. 11):
+    q(p'; alpha, beta) = min(alpha * p'^beta, 1)
 
-Optimal attention allocation Pa*(r, lambda, q):
-    Pa = ((1+q)*exp(r/lambda) - (1-q)) / (2*exp(r/lambda) - 2)
-    Pa = clip(Pa, 0.5, 1)
+Optimal attention probability  (Eq. 5):
+    Pa = clip( ((1+q)*exp(x) - (1-q)) / (2*(exp(x) - 1)),  0.5, 1 )
 
-Sensitivity  P1a(r, lambda, q) = 1 / (1 + ((1-Pa)/Pa) * exp(-r/lambda))
-Specificity  P1b(r, lambda, q) = 1 / (1 + (Pa/(1-Pa)) * exp(-r/lambda))
-Accuracy     Pc(r, lambda, q)  = 0.5*(1-q)*P1a + 0.5*(1-q)*P1b + 0.5*q
+Sensitivity / Specificity  (Eq. 4):
+    P1a = Pa*exp(x)  / (Pa*exp(x) + (1-Pa))
+    P2b = (1-Pa)*exp(x) / (Pa + (1-Pa)*exp(x))
 
-Parameters estimated
---------------------
-    r      : per-model information cost threshold
-    alpha  : shared noise-mapping scale  (q-p curve)
-    beta   : shared noise-mapping shape  (q-p curve)
-    lambda : fixed to 1 (set LAMBDA below to change)
+Accuracy  (Eq. 6):
+    Pc(q, x) = 0.5*(1-q)*P1a + 0.5*(1-q)*P2b + 0.5*q
 
-Estimation: joint MSSE minimisation over all models with multiple starts.
+Parameters estimated  (Eq. 12):
+    x_i = (r/lambda)_i  — reward-to-cost ratio, one per LLM
+    alpha, beta          — shared noise-mapping parameters
+
+lambda is recovered afterwards by setting r = 1:
+    lambda_i = r / x_i = 1 / x_i
+
+NIAS test (Eq. 9):
+    P(A=a | Y=1) >= (P(A=a | Y=2) + 2) / 3
 
 Input   : Dataset/results/<model>/summary_<model>.csv
-Output  : Dataset/results/ri_fit/fitted_params.csv
-          Dataset/results/ri_fit/<model>_fit.png
+Output  : Dataset/results/ri_fit/fitted_params.csv   — x, lambda, alpha, beta
+          Dataset/results/ri_fit/<model>_fit.png     — observed vs fitted Pc
+          Dataset/results/ri_fit/nias_test.csv       — NIAS test per noise level
 """
 
 import glob
 import os
+from scipy.stats import binomtest
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,169 +54,215 @@ from scipy.optimize import minimize
 RESULTS_DIR = "./Dataset/results"
 OUTPUT_DIR  = "./Dataset/results/ri_fit"
 
-# Models to fit jointly (must match directory names under RESULTS_DIR)
-# Format: (label, directory_name, pred_col_prefix)
+# Models to fit jointly — label must match directory name under RESULTS_DIR
+# Format: (display_label, directory_name)
 MODELS = [
-    ("GPT-3.5",  "gpt_gpt_3_5_turbo",      "gpt_gpt_3_5_turbo"),
-    ("Gemini",   "gemini_gemini_2_5_flash",  "gemini_gemini_2_5_flash"),
+    ("GPT-3.5",  "gpt_gpt_3_5_turbo"),
+    ("Gemini",   "gemini_gemini_2_5_flash"),
 ]
 
-LAMBDA = 1.0   # fixed; set to None to treat as a free parameter per model
-
-# Optimisation bounds:  r in (0, 100],  alpha in (0.01, 10],  beta in (1, 4]
-LB = np.array([1e-6, 0.01, 1.0])
-UB = np.array([1e2,  10.0, 4.0])
+# Bounds for optimisation:  x = r/lambda in (0, 100],  alpha in (0.01, 10],  beta in (1, 4]
+LB_X     = 1e-6
+UB_X     = 100.0
+LB_ALPHA = 0.01
+UB_ALPHA = 10.0
+LB_BETA  = 1.0
+UB_BETA  = 4.0
 # ==============================================================================
 
+_EPS = 1e-10   # numerical floor
+
 
 # ------------------------------------------------------------------------------
-# RI model functions (vectorised, numerically stable)
+# RI model  — all functions take x = r/lambda directly
 # ------------------------------------------------------------------------------
 
-def _pa_star(r, lam, q):
-    """Optimal attention probability Pa*(r, lambda, q), clamped to [0.5, 1]."""
-    e = np.exp(np.clip(r / lam, -500, 500))
-    num = (1 + q) * e - (1 - q)
-    den = 2 * e - 2
-    # den -> 0 when r -> 0; Pa -> 0.5 in that limit
+def _pa(x, q):
+    """Optimal attention Pa*(x, q), clamped to [0.5, 1-eps]  (Eq. 5)."""
+    ex = np.exp(np.clip(x, -500, 500))
+    num = (1 + q) * ex - (1 - q)
+    den = 2 * ex - 2
     pa = np.where(np.abs(den) < 1e-12, 0.5, num / den)
-    return np.clip(pa, 0.5, 1.0 - np.finfo(float).tiny)
+    return np.clip(pa, 0.5, 1.0 - _EPS)
 
 
-_EPS = 1e-10   # safe floor for pa away from 0/1
+def ri_p1a(x, q):
+    """P(A=a | V=1) — sensitivity for 'not hate' class  (Eq. 4)."""
+    pa = _pa(x, q)
+    ex = np.exp(np.clip(x, -500, 500))
+    return np.clip((pa * ex) / (pa * ex + (1 - pa)), 0.0, 1.0)
 
 
-def ri_p1a(r, lam, q):
-    """Sensitivity P(pred=1 | label=1)."""
-    pa = np.clip(_pa_star(r, lam, q), _EPS, 1 - _EPS)
-    e  = np.exp(np.clip(-r / lam, -500, 500))
-    return np.clip(1.0 / (1.0 + ((1 - pa) / pa) * e), 0.0, 1.0)
+def ri_p2b(x, q):
+    """P(A=b | V=2) — sensitivity for 'hate' class  (Eq. 4)."""
+    pa  = _pa(x, q)
+    pb  = 1.0 - pa
+    ex  = np.exp(np.clip(x, -500, 500))
+    return np.clip((pb * ex) / (pa + pb * ex), 0.0, 1.0)
 
 
-def ri_p1b(r, lam, q):
-    """Specificity P(pred=0 | label=0)."""
-    pa = np.clip(_pa_star(r, lam, q), _EPS, 1 - _EPS)
-    e  = np.exp(np.clip(-r / lam, -500, 500))
-    return np.clip(1.0 / (1.0 + (pa / (1 - pa)) * e), 0.0, 1.0)
-
-
-def ri_pc(r, lam, q):
-    """Accuracy Pc = 0.5*(1-q)*P1a + 0.5*(1-q)*P1b + 0.5*q."""
-    p1a = ri_p1a(r, lam, q)
-    p1b = ri_p1b(r, lam, q)
-    return 0.5 * (1 - q) * p1a + 0.5 * (1 - q) * p1b + 0.5 * q
+def ri_pc(x, q):
+    """Probability of correct action  (Eq. 6)."""
+    return 0.5 * (1 - q) * ri_p1a(x, q) + 0.5 * (1 - q) * ri_p2b(x, q) + 0.5 * q
 
 
 def q_of_p(p, alpha, beta):
-    """Noise-to-channel mapping q = alpha * p^beta, clipped to [0, 1]."""
+    """Noise-to-channel mapping  (Eq. 11)."""
     return np.clip(alpha * np.power(np.maximum(p, 0.0), beta), 0.0, 1.0)
 
 
-def pc_with_p(r, lam, p, alpha, beta):
-    return ri_pc(r, lam, q_of_p(p, alpha, beta))
+def pc_model(x, p, alpha, beta):
+    return ri_pc(x, q_of_p(p, alpha, beta))
 
 
-def p1a_with_p(r, lam, p, alpha, beta):
-    return ri_p1a(r, lam, q_of_p(p, alpha, beta))
+# ------------------------------------------------------------------------------
+# NIAS test  (Eq. 9)
+# ------------------------------------------------------------------------------
 
+def nias_test(summary_df, n_samples=400):
+    """
+    NIAS condition (Eq. 9):
+        P(A=a | Y=1) >= (P(A=a | Y=2) + 2) / 3
 
-def p1b_with_p(r, lam, p, alpha, beta):
-    return ri_p1b(r, lam, q_of_p(p, alpha, beta))
+    In our label convention:
+        Y=1 (not hate, label=0):  P(A=a | Y=1) = P1b  (specificity)
+        Y=2 (hate,     label=1):  P(A=a | Y=2) = 1 - P1a
+
+    p-value tests H0: P(A=a|Y=1) = constraint  vs  H1: P(A=a|Y=1) != constraint
+    using an exact binomial test (n = n_samples / 2 per class).
+    """
+    rows = []
+    n_per_class = n_samples // 2
+
+    for _, row in summary_df.iterrows():
+        p1a   = row["P1a"]      # P(predict hate | truth hate)
+        p1b   = row["P1b"]      # P(predict not-hate | truth not-hate)
+
+        p_a_given_y1 = p1b              # P(A=a | Y=1)
+        p_a_given_y2 = 1.0 - p1a       # P(A=a | Y=2)
+        constraint   = (p_a_given_y2 + 2.0) / 3.0
+        holds        = p_a_given_y1 >= constraint
+
+        # Exact binomial p-value for H0: true prob = constraint
+        k = int(round(p_a_given_y1 * n_per_class))
+        try:
+            pval = binomtest(k, n_per_class, constraint).pvalue
+        except Exception:
+            pval = float("nan")
+
+        rows.append({
+            "noise_p":           row["noise_p"],
+            "P(A=a|Y=1)":        round(p_a_given_y1, 4),
+            "P(A=a|Y=2)":        round(p_a_given_y2, 4),
+            "Constraint":        round(constraint, 4),
+            "NIAS_holds":        holds,
+            "p_value":           round(pval, 6) if not np.isnan(pval) else float("nan"),
+        })
+
+    return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------------------------
 # Data loading
 # ------------------------------------------------------------------------------
 
-def load_summary(model_dir_name, model_label):
-    pattern = os.path.join(RESULTS_DIR, model_dir_name, f"summary_{model_dir_name}.csv")
-    files = glob.glob(pattern)
+def load_summary(dir_name, label):
+    pattern = os.path.join(RESULTS_DIR, dir_name, f"summary_{dir_name}.csv")
+    files   = glob.glob(pattern)
     if not files:
         raise FileNotFoundError(
-            f"No summary CSV found for '{model_label}' at {pattern}\n"
-            f"Run compute_metrics.py first."
+            f"No summary CSV for '{label}' at {pattern}\n"
+            "Run compute_metrics.py first."
         )
     df = pd.read_csv(files[0]).sort_values("noise_p").reset_index(drop=True)
-    return df["noise_p"].values, df["Pc"].values, df["P1a"].values, df["P1b"].values
+    return df
 
 
 # ------------------------------------------------------------------------------
-# Fitting
+# Joint fitting
 # ------------------------------------------------------------------------------
 
-def _joint_msse(x, lam, datasets):
+def _joint_sse(params, datasets):
     """
-    x = [r_0, r_1, ..., r_N, alpha, beta]
-    datasets = list of (p_array, Pc_array)
+    params = [x_0, x_1, ..., x_N, alpha, beta]
+    datasets = list of (p_obs, Pc_obs)
     """
-    n = len(datasets)
-    r_vals  = x[:n]
-    alpha   = x[n]
-    beta    = x[n + 1]
-    total   = 0.0
+    n      = len(datasets)
+    xs     = params[:n]
+    alpha  = params[n]
+    beta   = params[n + 1]
+    total  = 0.0
     for i, (p_obs, Pc_obs) in enumerate(datasets):
-        Pc_pred = pc_with_p(r_vals[i], lam, p_obs, alpha, beta)
-        total  += np.mean((Pc_pred - Pc_obs) ** 2)
+        Pc_pred = pc_model(xs[i], p_obs, alpha, beta)
+        total  += np.sum((Pc_pred - Pc_obs) ** 2)
     return total
 
 
-def fit_joint(models_data, lam):
+def fit_joint(models_data):
     """
-    Fit shared (alpha, beta) and per-model r jointly to Pc data.
-    models_data: list of (label, p_obs, Pc_obs)
-    Returns: dict with r per model, alpha, beta, MSSE, R^2 per model.
-    """
-    n = len(models_data)
-    datasets = [(p, Pc) for _, p, Pc, _, _ in models_data]
+    Estimate {x_i, alpha, beta} jointly by minimising SSE over all LLMs' Pc.
 
-    # parameter vector: [r_0, r_1, ..., alpha, beta]
-    lb = np.concatenate([[LB[0]] * n, [LB[1], LB[2]]])
-    ub = np.concatenate([[UB[0]] * n, [UB[1], UB[2]]])
+    models_data: list of (label, summary_df)
+    Returns dict of results.
+    """
+    n        = len(models_data)
+    datasets = [(df["noise_p"].values, df["Pc"].values) for _, df in models_data]
+
+    lb  = np.array([LB_X] * n    + [LB_ALPHA, LB_BETA])
+    ub  = np.array([UB_X] * n    + [UB_ALPHA, UB_BETA])
     mid = (lb + ub) / 2.0
 
     x0_candidates = [
-        lb * (1 + 1e-3),
-        ub * (1 - 1e-3),
+        np.clip(lb * (1 + 1e-3), lb + 1e-9, ub - 1e-9),
+        np.clip(ub * (1 - 1e-3), lb + 1e-9, ub - 1e-9),
         mid,
     ]
-    # clip inside bounds
-    x0_candidates = [np.clip(x, lb + 1e-9, ub - 1e-9) for x in x0_candidates]
 
-    bounds = list(zip(lb, ub))
-    obj    = lambda x: _joint_msse(x, lam, datasets)
+    bounds     = list(zip(lb, ub))
+    best_x     = None
+    best_fval  = np.inf
 
-    best_x, best_fval = None, np.inf
     for k, x0 in enumerate(x0_candidates):
-        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds,
-                       options={"maxiter": 10000, "ftol": 1e-14, "gtol": 1e-10})
-        print(f"  Start {k+1}: MSSE={res.fun:.6g}  success={res.success}")
+        res = minimize(
+            _joint_sse, x0, args=(datasets,),
+            method="L-BFGS-B", bounds=bounds,
+            options={"maxiter": 10000, "ftol": 1e-14, "gtol": 1e-10},
+        )
+        print(f"  Start {k+1}: SSE={res.fun:.6g}  success={res.success}")
         if res.fun < best_fval:
             best_x, best_fval = res.x, res.fun
 
-    r_vals  = best_x[:n]
-    alpha   = best_x[n]
-    beta    = best_x[n + 1]
+    alpha = best_x[n]
+    beta  = best_x[n + 1]
 
-    results = {"alpha": alpha, "beta": beta, "lambda": lam, "joint_MSSE": best_fval, "models": {}}
-    for i, (label, p_obs, Pc_obs, P1a_obs, P1b_obs) in enumerate(models_data):
-        r = r_vals[i]
-        Pc_pred  = pc_with_p(r, lam, p_obs, alpha, beta)
-        P1a_pred = p1a_with_p(r, lam, p_obs, alpha, beta)
-        P1b_pred = p1b_with_p(r, lam, p_obs, alpha, beta)
+    results = {
+        "alpha":      alpha,
+        "beta":       beta,
+        "joint_SSE":  best_fval,
+        "models":     {},
+    }
 
-        sse = np.sum((Pc_pred - Pc_obs) ** 2)
-        sst = np.sum((Pc_obs  - Pc_obs.mean()) ** 2)
-        r2  = 1 - sse / max(sst, 1e-15)
+    for i, (label, df) in enumerate(models_data):
+        x        = best_x[i]
+        lam      = 1.0 / x          # lambda = r / x,  r = 1 assumed
+        p_obs    = df["noise_p"].values
+        Pc_obs   = df["Pc"].values
+
+        Pc_pred  = pc_model(x, p_obs, alpha, beta)
+        sse      = np.sum((Pc_pred - Pc_obs) ** 2)
+        sst      = np.sum((Pc_obs - Pc_obs.mean()) ** 2)
+        r2       = 1.0 - sse / max(sst, 1e-15)
 
         results["models"][label] = {
-            "r": r, "r_over_lambda": r / lam,
-            "MSSE": np.mean((Pc_pred - Pc_obs) ** 2),
-            "R2_Pc": r2,
-            "p_obs": p_obs,
-            "Pc_obs": Pc_obs,   "Pc_pred": Pc_pred,
-            "P1a_obs": P1a_obs, "P1a_pred": P1a_pred,
-            "P1b_obs": P1b_obs, "P1b_pred": P1b_pred,
+            "x":       x,           # estimated r/lambda
+            "lambda":  lam,         # = 1/x  (with r=1)
+            "SSE":     sse,
+            "MSSE":    sse / len(p_obs),
+            "R2":      r2,
+            "df":      df,
+            "Pc_pred": Pc_pred,
         }
+
     return results
 
 
@@ -215,91 +270,90 @@ def fit_joint(models_data, lam):
 # Plotting
 # ------------------------------------------------------------------------------
 
-def plot_fits(results, output_dir):
-    p_fine  = np.linspace(0, 1, 400)
-    alpha   = results["alpha"]
-    beta    = results["beta"]
-    lam     = results["lambda"]
-    q_fine  = q_of_p(p_fine, alpha, beta)
+def plot_fits(results):
+    p_fine = np.linspace(0, 1, 400)
+    alpha  = results["alpha"]
+    beta   = results["beta"]
 
     for label, m in results["models"].items():
-        r = m["r"]
+        x        = m["x"]
+        df       = m["df"]
+        Pc_fit   = pc_model(x, p_fine, alpha, beta)
 
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-        fig.suptitle(
-            f"{label}   (r={r:.3f}, r/λ={m['r_over_lambda']:.3f}, "
-            f"α={alpha:.3f}, β={beta:.3f})",
-            fontsize=12
-        )
-
-        for ax, key, title in zip(
-            axes,
-            ["Pc", "P1a", "P1b"],
-            ["Pc (accuracy)", "P1a (sensitivity)", "P1b (specificity)"],
-        ):
-            obs  = m[f"{key}_obs"]
-            pred = m[f"{key}_pred"]
-
-            if key == "Pc":
-                fine = pc_with_p(r, lam, p_fine, alpha, beta)
-            elif key == "P1a":
-                fine = p1a_with_p(r, lam, p_fine, alpha, beta)
-            else:
-                fine = p1b_with_p(r, lam, p_fine, alpha, beta)
-
-            ax.scatter(m["p_obs"], obs,  color="red",  zorder=3, label="Observed")
-            ax.plot(p_fine, fine,         color="blue", linewidth=2, label="RI fit")
-            ax.set_xlabel("Noise level p'")
-            ax.set_ylabel(key)
-            ax.set_title(title)
-            ax.set_ylim(0, 1)
-            ax.grid(True)
-            ax.legend(fontsize=8)
-
+        fig, ax  = plt.subplots(figsize=(6, 4))
+        ax.scatter(df["noise_p"], df["Pc"], color="red",  zorder=3,
+                   label=f"Observed Pc ({label})")
+        ax.plot(p_fine, Pc_fit,             color="blue", linewidth=2,
+                label=f"RI fit  (x={x:.3f}, lam={m['lambda']:.3f})")
+        ax.set_xlabel("Noise level p'")
+        ax.set_ylabel("Pc (correct decision probability)")
+        ax.set_title(f"{label}   alpha={alpha:.3f}, beta={beta:.3f}")
+        ax.set_ylim(0, 1)
+        ax.legend(fontsize=8)
+        ax.grid(True)
         fig.tight_layout()
-        fname = os.path.join(output_dir, f"{label.replace('-','').replace(' ','_')}_fit.png")
+
+        fname = os.path.join(OUTPUT_DIR, f"{label.replace('-','').replace(' ','_')}_fit.png")
         fig.savefig(fname, dpi=150)
         plt.close(fig)
-        print(f"  Plot saved -> {fname}")
+        print(f"  Plot -> {fname}")
 
-    # q vs p curve
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(p_fine, q_fine, "k-", linewidth=2)
+    # All models overlaid
+    fig, ax = plt.subplots(figsize=(7, 4))
+    colors  = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, (label, m) in enumerate(results["models"].items()):
+        c       = colors[i % len(colors)]
+        Pc_fit  = pc_model(m["x"], p_fine, alpha, beta)
+        ax.scatter(m["df"]["noise_p"], m["df"]["Pc"], color=c, zorder=3, s=40)
+        ax.plot(p_fine, Pc_fit, color=c, linewidth=2, label=label)
     ax.set_xlabel("Noise level p'")
-    ax.set_ylabel("q(p')")
-    ax.set_title(f"Noise mapping  q = α·p^β   (α={alpha:.3f}, β={beta:.3f})")
+    ax.set_ylabel("Pc")
+    ax.set_title(f"Extended RI model fits  (alpha={alpha:.3f}, beta={beta:.3f})")
     ax.set_ylim(0, 1)
+    ax.legend()
     ax.grid(True)
     fig.tight_layout()
-    fname = os.path.join(output_dir, "q_vs_p.png")
+    fname = os.path.join(OUTPUT_DIR, "all_models_fit.png")
     fig.savefig(fname, dpi=150)
     plt.close(fig)
-    print(f"  Plot saved -> {fname}")
+    print(f"  Plot -> {fname}")
 
 
 # ------------------------------------------------------------------------------
-# Save parameters CSV
+# Save CSVs
 # ------------------------------------------------------------------------------
 
-def save_params(results, output_dir):
+def save_params(results):
     rows = []
     for label, m in results["models"].items():
         rows.append({
-            "model":        label,
-            "r":            round(m["r"], 6),
-            "r_over_lambda": round(m["r_over_lambda"], 6),
-            "alpha":        round(results["alpha"], 6),
-            "beta":         round(results["beta"], 6),
-            "lambda":       round(results["lambda"], 6),
-            "MSSE_Pc":      round(m["MSSE"], 8),
-            "R2_Pc":        round(m["R2_Pc"], 6),
+            "model":   label,
+            "x_r_over_lambda": round(m["x"],      6),
+            "lambda":          round(m["lambda"],  6),
+            "alpha":           round(results["alpha"], 6),
+            "beta":            round(results["beta"],  6),
+            "SSE_Pc":          round(m["SSE"],     8),
+            "MSSE_Pc":         round(m["MSSE"],    8),
+            "R2_Pc":           round(m["R2"],      6),
         })
-    df = pd.DataFrame(rows)
-    path = os.path.join(output_dir, "fitted_params.csv")
+    df   = pd.DataFrame(rows)
+    path = os.path.join(OUTPUT_DIR, "fitted_params.csv")
     df.to_csv(path, index=False)
-    print(f"\nFitted parameters saved -> {path}")
+    print(f"\n  Fitted params -> {path}")
     print(df.to_string(index=False))
-    return df
+
+
+def save_nias(nias_results):
+    rows = []
+    for label, ndf in nias_results.items():
+        ndf = ndf.copy()
+        ndf.insert(0, "model", label)
+        rows.append(ndf)
+    out = pd.concat(rows, ignore_index=True)
+    path = os.path.join(OUTPUT_DIR, "nias_test.csv")
+    out.to_csv(path, index=False)
+    print(f"\n  NIAS test     -> {path}")
+    return out
 
 
 # ------------------------------------------------------------------------------
@@ -309,39 +363,48 @@ def save_params(results, output_dir):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Load data for each model
-    models_data = []
-    for label, dir_name, _ in MODELS:
+    models_data  = []
+    nias_results = {}
+
+    for label, dir_name in MODELS:
         try:
-            p_obs, Pc_obs, P1a_obs, P1b_obs = load_summary(dir_name, label)
-            models_data.append((label, p_obs, Pc_obs, P1a_obs, P1b_obs))
-            print(f"Loaded {label}: {len(p_obs)} noise levels")
+            df = load_summary(dir_name, label)
+            models_data.append((label, df))
+            nias_results[label] = nias_test(df)
+            print(f"Loaded {label}: {len(df)} noise levels")
         except FileNotFoundError as e:
             print(f"WARNING: {e}")
 
     if not models_data:
         raise RuntimeError("No model data found. Run compute_metrics.py first.")
 
-    lam = LAMBDA if LAMBDA is not None else 1.0
+    # --- NIAS test ---
+    print("\n=== NIAS Test (Eq. 9) ===")
+    nias_all = save_nias(nias_results)
+    for label in nias_results:
+        sub = nias_all[nias_all["model"] == label]
+        n_pass = sub["NIAS_holds"].sum()
+        print(f"  {label}: {n_pass}/{len(sub)} environments satisfy NIAS")
+    print(nias_all[["model","noise_p","P(A=a|Y=1)","Constraint","NIAS_holds","p_value"]].to_string(index=False))
 
-    print(f"\nFitting RI model (lambda={lam}, fixed)...")
-    print(f"Models: {[m[0] for m in models_data]}")
-    print(f"Parameters: r per model + shared alpha, beta\n")
+    # --- Fit RI model ---
+    print(f"\n=== Fitting RI model ===")
+    print(f"Estimating: x = r/lambda per model, shared alpha and beta")
+    print(f"(lambda recovered as 1/x after fitting, assuming r=1)\n")
 
-    results = fit_joint(models_data, lam)
+    results = fit_joint(models_data)
 
     print(f"\n{'='*55}")
-    print(f"  alpha (shared) = {results['alpha']:.6f}")
-    print(f"  beta  (shared) = {results['beta']:.6f}")
-    print(f"  lambda (fixed) = {results['lambda']:.6f}")
-    print(f"  Joint MSSE     = {results['joint_MSSE']:.8f}")
+    print(f"  alpha  (shared) = {results['alpha']:.6f}")
+    print(f"  beta   (shared) = {results['beta']:.6f}")
+    print(f"  Joint SSE       = {results['joint_SSE']:.8f}")
     for label, m in results["models"].items():
-        print(f"  {label:12s}  r={m['r']:.6f}  r/lam={m['r_over_lambda']:.4f}  "
-              f"MSSE={m['MSSE']:.6f}  R2={m['R2_Pc']:.4f}")
-    print(f"{'='*55}\n")
+        print(f"  {label:12s}  x={m['x']:.4f}  lambda={m['lambda']:.4f}  "
+              f"MSSE={m['MSSE']:.6f}  R2={m['R2']:.4f}")
+    print(f"{'='*55}")
 
-    save_params(results, OUTPUT_DIR)
-    plot_fits(results, OUTPUT_DIR)
+    save_params(results)
+    plot_fits(results)
 
 
 if __name__ == "__main__":
