@@ -189,12 +189,30 @@ def run_pipeline(noise_types=None, snr_levels=None):
     print("\n[2/3] Loading ASR model ...")
     whisper = load_whisper()
 
-    # --- Step 3: For each noise type × SNR level, inject noise + transcribe ---
-    print("\n[3/3] Noise injection + ASR transcription ...")
+    # --- Step 3a: Clean baseline — TTS → ASR, no noise, independent of noise type ---
+    print("\n[3/3] ASR transcription ...")
+    noisy_snr_levels = [s for s in snr_levels if s is not None]
+    run_clean        = None in snr_levels
 
-    # Cache clean transcriptions (same across all noise types)
-    clean_transcriptions = None
+    if run_clean:
+        clean_dir  = os.path.join(OUTPUT_DIR, "clean")
+        clean_path = os.path.join(clean_dir, f"hate_speech_{datasize}_clean.csv")
+        os.makedirs(clean_dir, exist_ok=True)
 
+        if os.path.exists(clean_path):
+            print(f"  Skip clean (exists): {os.path.basename(clean_path)}")
+            clean_df = pd.read_csv(clean_path, encoding="utf-8-sig")
+        else:
+            print("  Clean baseline (no noise) ...")
+            clean_texts = []
+            for wav_path in tqdm(wav_paths, desc="  Clean ASR"):
+                clean_texts.append(transcribe(whisper, wav_path))
+            clean_df = df.copy()
+            clean_df["text"] = clean_texts
+            clean_df.to_csv(clean_path, index=False, encoding="utf-8-sig")
+            print(f"  Saved: {clean_path}")
+
+    # --- Step 3b: For each noise type × SNR level, inject noise + transcribe ---
     for noise_type in noise_types:
         noise_file = os.path.join(NOISE_DIR, f"{noise_type}_noise.wav")
         if not os.path.exists(noise_file):
@@ -206,7 +224,7 @@ def run_pipeline(noise_types=None, snr_levels=None):
         os.makedirs(out_dir, exist_ok=True)
 
         print(f"\n  Noise type: {noise_type}")
-        for snr in tqdm(snr_levels, desc=f"    SNR levels"):
+        for snr in tqdm(noisy_snr_levels, desc=f"    SNR levels"):
             label    = _snr_label(snr)
             out_path = os.path.join(out_dir, f"hate_speech_{datasize}_{label}.csv")
 
@@ -214,27 +232,18 @@ def run_pipeline(noise_types=None, snr_levels=None):
                 tqdm.write(f"      Skip (exists): {os.path.basename(out_path)}")
                 continue
 
-            if snr is None:
-                # Clean: TTS → ASR (no noise) — compute once, reuse across noise types
-                if clean_transcriptions is None:
-                    clean_transcriptions = []
-                    for wav_path in tqdm(wav_paths, desc="      Clean ASR", leave=False):
-                        clean_transcriptions.append(transcribe(whisper, wav_path))
-                transcriptions = clean_transcriptions
-            else:
-                transcriptions = []
-                for speech, wav_path in tqdm(
-                    zip(speech_wavs, wav_paths), total=n,
-                    desc=f"      SNR {snr:+d} dB", leave=False
-                ):
-                    noisy     = mix_at_snr(speech, noise_wav, snr)
-                    noisy_wav = wav_path.replace(".wav", f"_{label}.wav")
-                    torchaudio.save(noisy_wav, noisy, TARGET_SR)
-                    transcriptions.append(transcribe(whisper, noisy_wav))
-                    os.remove(noisy_wav)
+            transcriptions = []
+            for speech, wav_path in tqdm(
+                zip(speech_wavs, wav_paths), total=n,
+                desc=f"      SNR {snr:+d} dB", leave=False
+            ):
+                noisy_wav = wav_path.replace(".wav", f"_{label}.wav")
+                torchaudio.save(noisy_wav, mix_at_snr(speech, noise_wav, snr), TARGET_SR)
+                transcriptions.append(transcribe(whisper, noisy_wav))
+                os.remove(noisy_wav)
 
-            out_df          = df.copy()
-            out_df["text"]  = transcriptions
+            out_df         = df.copy()
+            out_df["text"] = transcriptions
             out_df.to_csv(out_path, index=False, encoding="utf-8-sig")
             tqdm.write(f"      Saved: {os.path.basename(out_path)}")
 
