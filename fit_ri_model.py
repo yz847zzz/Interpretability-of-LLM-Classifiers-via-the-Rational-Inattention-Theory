@@ -57,8 +57,10 @@ OUTPUT_DIR  = "./Dataset/results/ri_fit"
 # Models to fit jointly — label must match directory name under RESULTS_DIR
 # Format: (display_label, directory_name)
 MODELS = [
-    ("GPT-3.5",  "gpt_gpt_3_5_turbo"),
-    ("Gemini",   "gemini_gemini_2_5_flash"),
+    ("GPT-3.5-turbo",        "gpt_gpt_3_5_turbo"),
+    ("GPT-5.4-nano",         "gpt_gpt_5_4_nano"),
+    ("Gemini-2.5-Flash",     "gemini_gemini_2_5_flash"),
+    ("Gemini-2.5-Flash-Lite","gemini_gemini_2_5_flash_lite"),
 ]
 
 # Bounds for optimisation:  x = r/lambda in (0, 100],  alpha in (0.01, 10],  beta in (1, 4]
@@ -119,7 +121,7 @@ def pc_model(x, p, alpha, beta):
 # NIAS test  (Eq. 9)
 # ------------------------------------------------------------------------------
 
-def nias_test(summary_df, n_samples=400):
+def nias_test(summary_df, n_samples=100):
     """
     NIAS condition (Eq. 9):
         P(A=a | Y=1) >= (P(A=a | Y=2) + 2) / 3
@@ -135,11 +137,9 @@ def nias_test(summary_df, n_samples=400):
     n_per_class = n_samples // 2
 
     for _, row in summary_df.iterrows():
-        p1a   = row["P1a"]      # P(predict hate | truth hate)
-        p1b   = row["P1b"]      # P(predict not-hate | truth not-hate)
-
-        p_a_given_y1 = p1b              # P(A=a | Y=1)
-        p_a_given_y2 = 1.0 - p1a       # P(A=a | Y=2)
+        # New notation: P1a=P(a|S1), P2a=P(a|S2), P1b=P(b|S1), P2b=P(b|S2)
+        p_a_given_y1 = row["P1a"]   # P(A=a | Y=1) = P(pred NoHate | True NoHate)
+        p_a_given_y2 = row["P2a"]   # P(A=a | Y=2) = P(pred NoHate | True Hate)
         constraint   = (p_a_given_y2 + 2.0) / 3.0
         holds        = p_a_given_y1 >= constraint
 
@@ -324,23 +324,46 @@ def plot_fits(results):
 # ------------------------------------------------------------------------------
 
 def save_params(results):
+    # Per-model parameters
     rows = []
     for label, m in results["models"].items():
         rows.append({
-            "model":   label,
-            "x_r_over_lambda": round(m["x"],      6),
-            "lambda":          round(m["lambda"],  6),
-            "alpha":           round(results["alpha"], 6),
-            "beta":            round(results["beta"],  6),
-            "SSE_Pc":          round(m["SSE"],     8),
-            "MSSE_Pc":         round(m["MSSE"],    8),
-            "R2_Pc":           round(m["R2"],      6),
+            "model":           label,
+            "x_r_over_lambda": round(m["x"],           6),
+            "lambda":          round(m["lambda"],       6),
+            "alpha":           round(results["alpha"],  6),
+            "beta":            round(results["beta"],   6),
+            "SSE_Pc":          round(m["SSE"],          8),
+            "MSSE_Pc":         round(m["MSSE"],         8),
+            "R2_Pc":           round(m["R2"],           6),
         })
-    df   = pd.DataFrame(rows)
-    path = os.path.join(OUTPUT_DIR, "fitted_params.csv")
-    df.to_csv(path, index=False)
-    print(f"\n  Fitted params -> {path}")
-    print(df.to_string(index=False))
+    df_model = pd.DataFrame(rows)
+    path_model = os.path.join(OUTPUT_DIR, "fitted_params.csv")
+    df_model.to_csv(path_model, index=False)
+    print(f"\n  Fitted params (per model) -> {path_model}")
+    print(df_model.to_string(index=False))
+
+    # Shared noise-mapping parameters with q values at key noise levels
+    alpha = results["alpha"]
+    beta  = results["beta"]
+    key_p = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    shared_rows = [{
+        "alpha":   round(alpha, 6),
+        "beta":    round(beta,  6),
+        **{f"q(p={p:.1f})": round(float(q_of_p(p, alpha, beta)), 6) for p in key_p},
+    }]
+    df_shared = pd.DataFrame(shared_rows)
+    path_shared = os.path.join(OUTPUT_DIR, "shared_noise_params.csv")
+    df_shared.to_csv(path_shared, index=False)
+    print(f"\n  Shared noise params       -> {path_shared}")
+
+    print(f"\n  Noise mapping  q(p') = min(alpha * p'^beta, 1)")
+    print(f"  alpha = {alpha:.6f},  beta = {beta:.6f}")
+    print(f"  {'p':>6}  {'q(p)':>8}")
+    print(f"  {'------':>6}  {'--------':>8}")
+    for p in key_p:
+        q = float(q_of_p(p, alpha, beta))
+        print(f"  {p:>6.1f}  {q:>8.4f}")
 
 
 def save_nias(nias_results):

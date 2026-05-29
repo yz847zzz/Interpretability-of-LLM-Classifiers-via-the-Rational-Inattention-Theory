@@ -72,7 +72,7 @@ def _noise_level(filename):
 
 
 def compute_summary(model_dir, pred_col, model_label):
-    files = sorted(glob.glob(os.path.join(model_dir, "hate_speech_400_p_*.csv")))
+    files = sorted(glob.glob(os.path.join(model_dir, "hate_speech_*_p_*.csv")))
     if not files:
         raise FileNotFoundError(
             f"No result files found in {model_dir}.\n"
@@ -97,18 +97,26 @@ def compute_summary(model_dir, pred_col, model_label):
         pred  = pd.to_numeric(df[pred_col], errors="coerce").fillna(0).astype(int).clip(0, 1)
         truth = df[TRUTH_COL]
 
-        p1  = float(truth.mean())
-        p0  = 1.0 - p1
-        p1a = float(pred[truth == 1].mean()) if (truth == 1).sum() > 0 else 0.0
-        p1b = float(1.0 - pred[truth == 0].mean()) if (truth == 0).sum() > 0 else 0.0
-        pc  = p1 * p1a + p0 * p1b
-        iya = _mutual_info(p1, p1a, p1b)
+        p_s2 = float(truth.mean())        # P(State=2) = P(label=1) = P(Hate)
+        p_s1 = 1.0 - p_s2               # P(State=1) = P(label=0) = P(No Hate)
+
+        # P{state}{action}: state1=NoHate(label=0), state2=Hate(label=1)
+        #                   action_a=predict NoHate(pred=0), action_b=predict Hate(pred=1)
+        p1a = float(1.0 - pred[truth == 0].mean()) if (truth == 0).sum() > 0 else 0.0  # P(a|S1)
+        p1b = float(pred[truth == 0].mean())        if (truth == 0).sum() > 0 else 0.0  # P(b|S1)
+        p2a = float(1.0 - pred[truth == 1].mean()) if (truth == 1).sum() > 0 else 0.0  # P(a|S2)
+        p2b = float(pred[truth == 1].mean())        if (truth == 1).sum() > 0 else 0.0  # P(b|S2)
+
+        pc  = p_s2 * p2b + p_s1 * p1a
+        iya = _mutual_info(p_s2, p2b, p1a)
 
         rows.append({
             "noise_p":  _noise_level(fname),
             "filename": fname,
             "P1a":      round(p1a, 6),
+            "P2a":      round(p2a, 6),
             "P1b":      round(p1b, 6),
+            "P2b":      round(p2b, 6),
             "Pc":       round(pc,  6),
             "IYA_nats": round(iya, 6),
         })
@@ -118,10 +126,10 @@ def compute_summary(model_dir, pred_col, model_label):
     print(f"\n{'='*60}")
     print(f" {model_label}")
     print(f"{'='*60}")
-    print(f"  {'noise_p':>8}  {'P1a':>8}  {'P1b':>8}  {'Pc':>8}  {'I(Y;A)':>10}")
-    print(f"  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*10}")
+    print(f"  {'noise_p':>8}  {'P1a':>8}  {'P2a':>8}  {'P1b':>8}  {'P2b':>8}  {'Pc':>8}  {'I(Y;A)':>10}")
+    print(f"  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*10}")
     for _, row in summary.iterrows():
-        print(f"  {row.noise_p:>8.1f}  {row.P1a:>8.4f}  {row.P1b:>8.4f}  {row.Pc:>8.4f}  {row.IYA_nats:>10.6f}")
+        print(f"  {row.noise_p:>8.1f}  {row.P1a:>8.4f}  {row.P2a:>8.4f}  {row.P1b:>8.4f}  {row.P2b:>8.4f}  {row.Pc:>8.4f}  {row.IYA_nats:>10.6f}")
 
     out_path = os.path.join(model_dir, f"summary_{model_label}.csv")
     summary.to_csv(out_path, index=False)
@@ -139,10 +147,12 @@ def main():
         "--model", choices=["gpt", "gemini", "both"], default="gpt",
         help="Which model results to summarise (default: gpt)"
     )
+    parser.add_argument("--gpt-model",    default=None, help=f"GPT model ID (default: {GPT_MODEL})")
+    parser.add_argument("--gemini-model", default=None, help=f"Gemini model ID (default: {GEMINI_MODEL})")
     args = parser.parse_args()
 
     if args.model in ("gpt", "both"):
-        tag = _make_tag(GPT_MODEL)
+        tag = _make_tag(args.gpt_model or GPT_MODEL)
         compute_summary(
             model_dir   = os.path.join(RESULTS_DIR, f"gpt_{tag}"),
             pred_col    = f"pred_gpt_{tag}",
@@ -150,7 +160,7 @@ def main():
         )
 
     if args.model in ("gemini", "both"):
-        tag = _make_tag(GEMINI_MODEL)
+        tag = _make_tag(args.gemini_model or GEMINI_MODEL)
         compute_summary(
             model_dir   = os.path.join(RESULTS_DIR, f"gemini_{tag}"),
             pred_col    = f"pred_gemini_{tag}",
