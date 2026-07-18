@@ -224,3 +224,27 @@ Dataset/
 ## Dataset
 
 The base dataset is [ucberkeley-dlab/measuring-hate-speech](https://huggingface.co/datasets/ucberkeley-dlab/measuring-hate-speech) (Kennedy et al., 2020), available from Hugging Face. No redistribution of the raw data is included in this repository.
+
+## Citation
+
+If you use this repository, including the text-noise generation pipeline, LLM classification evaluation scripts, conditional probability metrics, NIAS test, or Rational Inattention model-fitting code, please cite the following paper:
+
+```bibtex
+@inproceedings{zhao-abdi-2026-interpretability,
+  title = {Interpretability of {LLM} Classifiers via the Rational Inattention Theory with Application to Hate Speech Detection},
+  author = {Zhao, Yuan and Abdi, Ali},
+  editor = {T.Y.S.S., Santosh and Rodriguez, Juan Diego and de Gibert, Ona},
+  booktitle = {Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 4: Student Research Workshop)},
+  month = jul,
+  year = {2026},
+  address = {San Diego, California, United States},
+  publisher = {Association for Computational Linguistics},
+  pages = {281--289},
+  doi = {10.18653/v1/2026.acl-srw.23},
+  url = {https://aclanthology.org/2026.acl-srw.23/},
+  isbn = {979-8-89176-393-7}
+}
+```
+
+This repository implements the experimental pipeline described in the paper, including hate-speech data preprocessing, controlled text-noise generation, LLM response collection, performance-metric computation, NIAS testing, and extended Rational Inattention model fitting.
+
