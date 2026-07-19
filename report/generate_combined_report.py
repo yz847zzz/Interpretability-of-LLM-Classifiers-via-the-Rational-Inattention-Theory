@@ -32,7 +32,7 @@ BASE        = "./Dataset/results"
 AUDIO_SUM   = f"{BASE}/bootstrap/bootstrap_summary.csv"
 AUDIO_MOD   = f"{BASE}/bootstrap/pairwise_model_tests.csv"
 AUDIO_CROSS = f"{BASE}/bootstrap/pairwise_tests.csv"
-OUT_PATH    = f"{BASE}/paper_report_v5.docx"
+OUT_PATH    = f"{BASE}/paper_report_v6.docx"
 
 NOISE_ORDER  = ["white",  "babble",  "cafe"]
 NOISE_LABELS = {"white": "White Noise", "babble": "Babble Noise", "cafe": "Café Noise"}
@@ -378,20 +378,66 @@ def main():
     # ── 4b. Parameter estimates table ─────────────────────────────────────
     page_break(doc)
     h(doc, "4b. Estimated RI Parameters (Bootstrap SE and 95% CI)", 2)
+
+    import numpy as np
+
+    PRICE_MAP = {"GPT-3.5-turbo": 0.50, "GPT-5.4-nano": 0.20,
+                 "Gemini-2.5-Flash": 0.30, "Gemini-2.5-Flash-Lite": 0.10}
+
     p(doc,
-      "Table 1 reports the jointly estimated RI parameters for each noise condition. "
-      "λ = r/x where r = input token price ($/1M tokens) and x is the directly fitted "
-      "RI decision parameter; see Section 4b-ii for motivation. "
-      "Standard errors and 95% CIs are from B = 1,000 bootstrap replicates "
-      "(percentile method, Efron & Tibshirani, 1993). "
-      "α and β are shared environment parameters.",
+      "In the RI framework the reward r for a correct classification is set to the "
+      "model's API input token price ($/1M tokens, standard tier, July 2026). "
+      "Because the classification prompt is identical for all models and output is "
+      "a single JSON digit (≤16 tokens), output cost is negligible and the effective "
+      "per-call cost is determined entirely by the input price. "
+      "The information cost is therefore λ = r / x, where x is the directly fitted "
+      "RI decision parameter. "
+      "The input prices used as r are listed below.",
       size=10)
 
     doc.add_paragraph()
 
-    # Build wide table: rows = params, cols = noise types
+    # ── Model input price table (before Table 1) ──────────────────────────
+    price_cols = ["Model", "Input price r  ($/1M tokens)", "Source"]
+    price_sources = {
+        "GPT-3.5-turbo":         "openai.com/api/pricing",
+        "GPT-5.4-nano":          "openai.com/api/pricing",
+        "Gemini-2.5-Flash":      "cloud.google.com/vertex-ai/generative-ai/pricing",
+        "Gemini-2.5-Flash-Lite": "cloud.google.com/vertex-ai/generative-ai/pricing",
+    }
+    pt = doc.add_table(rows=1, cols=len(price_cols))
+    pt.style = "Table Grid"
+    hdr_row(pt, price_cols)
+    for m in MODEL_ORDER:
+        data_row(pt, [m, f"${PRICE_MAP[m]:.2f}", price_sources[m]],
+                 center_cols=[1])
+    col_widths(pt, [1.85, 1.60, 3.15])
+    p(doc,
+      "Model input token prices used as reward r in λ = r/x. "
+      "Standard tier pricing, July 2026. Output tokens ignored.",
+      italic=True, size=9)
+
+    doc.add_paragraph()
+
+    p(doc,
+      "Table 1 reports the jointly estimated RI parameters for each noise condition. "
+      "Standard errors and 95% CIs are from B = 1,000 bootstrap replicates "
+      "(percentile method, Efron & Tibshirani, 1993). "
+      "λ = r/x with r = input token price as above; "
+      "SE(λ) is the standard deviation of the bootstrap distribution of r/x. "
+      "α and β are shared noise-environment parameters.",
+      size=10)
+
+    doc.add_paragraph()
+
+    # Build Table 1: rows = params, cols = noise types
+    lam_full = aud_sum[aud_sum["param"].str.startswith("lambda_")].copy()
+    lam_full["model"] = lam_full["param"].str.replace("lambda_", "")
+    lam_full["price"] = lam_full["model"].map(PRICE_MAP)
+
     param_order = [f"lambda_{m}" for m in MODEL_ORDER] + ["alpha", "beta"]
-    param_labels = {f"lambda_{m}": f"λ  {m}" for m in MODEL_ORDER}
+    param_labels = {f"lambda_{m}": f"λ  {m}  (r=${PRICE_MAP[m]:.2f})"
+                    for m in MODEL_ORDER}
     param_labels["alpha"] = "α  (shared)"
     param_labels["beta"]  = "β  (shared)"
 
@@ -412,163 +458,33 @@ def main():
                     f"{r['estimate']:.4f} ± {r['se']:.4f}\n"
                     f"[{r['ci_lo']:.4f}, {r['ci_hi']:.4f}]"
                 )
-        # shade lambda rows alternately
-        is_alpha_beta = param in ("alpha", "beta")
         data_row(t, vals, center_cols=[1, 2, 3])
 
-    col_widths(t, [1.9, 1.6, 1.6, 1.6])
-    p(doc, "Table 1. Estimate ± Bootstrap SE  [95% CI]. B = 1,000 replicates.",
+    col_widths(t, [2.2, 1.5, 1.5, 1.5])
+    p(doc,
+      "Table 1. Estimated RI parameters: estimate ± Bootstrap SE  [95% CI]. "
+      "B = 1,000 replicates. λ = r/x with r = input token price per model.",
       italic=True, size=9)
 
     doc.add_paragraph()
 
-    # ── 4b-ii. Token Price as Reward: λ = r/x ─────────────────────────────
-    h(doc, "4b-ii. Token Price as Reward and the True Information Cost (λ)", 2)
-
-    import numpy as np
-
-    PRICE_MAP = {"GPT-3.5-turbo": 0.50, "GPT-5.4-nano": 0.20,
-                 "Gemini-2.5-Flash": 0.30, "Gemini-2.5-Flash-Lite": 0.10}
-
+    # ── 4b-ii. Motivation for r = token price ─────────────────────────────
+    h(doc, "4b-ii. Why Input Token Price as Reward", 2)
     p(doc,
-      "Choice of reward r.  "
-      "In the RI framework the fitted parameter is x = r / λ, where r is the reward "
-      "the decision-maker obtains for a correct classification. "
-      "A natural, model-specific choice of r is the API input token price ($/1M tokens): "
-      "because the classification prompt is identical for all models and single-digit "
-      'JSON output (≤16 tokens) makes output cost negligible, the effective monetary '
-      "cost of each decision is determined entirely by the input price. "
-      "Setting r = token price for each model and keeping the directly fitted x, "
-      "the true information cost is:",
+      "In the RI model, r represents the value the agent gains from making a correct "
+      "decision. Here the LLM is the agent and the task is binary hate-speech detection. "
+      "Because all models receive the same prompt (input) and are constrained to a "
+      "single-digit JSON response (output ≤ 16 tokens), the only financial cost that "
+      "varies across models is the input token price. "
+      "This price is charged per call regardless of whether the answer is correct, "
+      "so it acts as a proxy for the opportunity cost of attention: a more expensive "
+      "model implicitly demands a higher reward to justify the same level of information "
+      "processing. "
+      "Setting r = input price ($/1M tokens) and keeping the directly fitted x, "
+      "the information cost λ = r / x directly reflects how much the model charges "
+      "per bit of decision-relevant information it processes.",
       size=10)
 
-    p(doc,
-      "    λ = r / x   (r = input token price, $/1M tokens)",
-      bold=True, size=10)
-
-    p(doc,
-      "This replaces the r = 1 normalisation used in early analyses. "
-      "All λ values in Table 1 and throughout this paper use this definition. "
-      "SE propagation: the bootstrap distribution of x is available from B = 1,000 "
-      "replicates; λ = r/x is a monotone transformation, so the bootstrap distribution "
-      "of λ is obtained directly, and SE(λ) = std of the bootstrap λ distribution.",
-      size=10)
-
-    doc.add_paragraph()
-
-    # Build averaged λ and x per model
-    lam_full = aud_sum[aud_sum["param"].str.startswith("lambda_")].copy()
-    lam_full["model"] = lam_full["param"].str.replace("lambda_", "")
-    lam_full["price"] = lam_full["model"].map(PRICE_MAP)
-
-    x_full = aud_sum[aud_sum["param"].str.startswith("x_")].copy()
-    x_full["model"] = x_full["param"].str.replace("x_", "")
-
-    def avg_se_propagated(series):
-        return np.sqrt((series ** 2).sum()) / len(series)
-
-    lam_avg = lam_full.groupby("model").agg(
-        price    = ("price",    "first"),
-        lam_mean = ("estimate", "mean"),
-        se_mean  = ("se",       avg_se_propagated),
-    ).reset_index()
-
-    x_avg = x_full.groupby("model").agg(
-        x_mean = ("estimate", "mean"),
-    ).reset_index()
-
-    cmp_df = lam_avg.merge(x_avg, on="model")
-    cmp_df = cmp_df.sort_values("lam_mean").reset_index(drop=True)
-    cmp_df["lam_rank"] = range(1, len(cmp_df) + 1)
-    cmp_df["x_rank"]   = cmp_df["x_mean"].rank(ascending=False).astype(int)
-
-    # ── Table 2: x vs λ comparison ────────────────────────────────────────
-    p(doc,
-      "Table 2 shows, for each model, the directly fitted x (raw decision efficiency "
-      "under r = 1), the token price r, and the resulting λ = r/x averaged across the "
-      "three noise conditions. "
-      "Larger x means the model attains higher decision accuracy per unit information "
-      "cost under a unit reward. "
-      "λ = r/x rescales x by the monetary reward: a cheap model with large x can still "
-      "carry a low λ if its price is low enough.",
-      size=10)
-
-    cmp_cols = ["Model", "x (fitted, avg)", "r ($/1M tok)",
-                "λ = r/x (avg ± SE)", "x rank", "λ rank"]
-    ct = doc.add_table(rows=1, cols=len(cmp_cols))
-    ct.style = "Table Grid"
-    hdr_row(ct, cmp_cols)
-
-    for _, row in cmp_df.iterrows():
-        data_row(ct,
-                 [row["model"],
-                  f"{row['x_mean']:.4f}",
-                  f"${row['price']:.2f}",
-                  f"{row['lam_mean']:.4f} ± {row['se_mean']:.4f}",
-                  str(int(row["x_rank"])),
-                  str(int(row["lam_rank"]))],
-                 center_cols=[1, 2, 3, 4, 5])
-
-    col_widths(ct, [1.85, 1.25, 1.05, 1.75, 0.80, 0.80])
-    p(doc,
-      "Table 2. Comparison of fitted x (raw, r=1) and λ = r/x (price-adjusted), "
-      "averaged across white, babble, and café noise conditions. "
-      "x rank: 1 = largest x = highest raw decision efficiency. "
-      "λ rank: 1 = smallest λ = lowest price-adjusted information cost. "
-      "Sources: openai.com/api/pricing; cloud.google.com/vertex-ai/generative-ai/pricing "
-      "(standard tier, July 2026; output tokens ignored).",
-      italic=True, size=9)
-
-    doc.add_paragraph()
-
-    # Interpretation
-    most_eff  = cmp_df.iloc[0]
-    least_eff = cmp_df.iloc[-1]
-    p(doc,
-      f"Key observation (Table 2):  The ranking by raw decision efficiency x and by "
-      f"price-adjusted information cost λ diverge. "
-      f"GPT-3.5-turbo has the largest x (x rank 1) — the highest raw decision accuracy "
-      f"per unit information cost — but its high price ($0.50/M) places it at "
-      f"λ rank {int(cmp_df[cmp_df['model']=='GPT-3.5-turbo']['lam_rank'].values[0])}. "
-      f"Gemini-2.5-Flash-Lite, with the smallest x yet the cheapest price ($0.10/M), "
-      f"achieves the lowest λ (rank 1), making it the most cost-efficient model "
-      f"in the price-adjusted sense. "
-      f"This reranking shows that monetary cost dominates raw efficiency differences "
-      f"at the price levels observed.",
-      size=10)
-
-    doc.add_paragraph()
-
-    # ── Table 3: per-noise λ breakdown ────────────────────────────────────
-    p(doc, "Table 3 shows λ = r/x for each model and noise condition separately.",
-      size=10)
-
-    lam_noise_cols = ["Model", "r ($/1M tok)"] + [NOISE_LABELS[n] for n in NOISE_ORDER]
-    lt3 = doc.add_table(rows=1, cols=len(lam_noise_cols))
-    lt3.style = "Table Grid"
-    hdr_row(lt3, lam_noise_cols)
-
-    for m in MODEL_ORDER:
-        price_val = PRICE_MAP.get(m, float("nan"))
-        vals = [m, f"${price_val:.2f}"]
-        for noise in NOISE_ORDER:
-            sub = lam_full[(lam_full["model"] == m) & (lam_full["noise"] == noise)]
-            if not sub.empty:
-                r = sub.iloc[0]
-                vals.append(f"{r['estimate']:.4f} ± {r['se']:.4f}\n"
-                            f"[{r['ci_lo']:.4f}, {r['ci_hi']:.4f}]")
-            else:
-                vals.append("—")
-        data_row(lt3, vals, center_cols=[1, 2, 3, 4])
-
-    col_widths(lt3, [1.85, 1.05, 1.55, 1.55, 1.55])
-    p(doc,
-      "Table 3. λ = r/x per noise condition (estimate ± Bootstrap SE  [95% CI]). "
-      "Model order matches Table 1. "
-      "SE is the standard deviation of the bootstrap distribution of λ = r/x.",
-      italic=True, size=9)
-
-    doc.add_paragraph()
     doc.add_paragraph()
 
     # ── 4c. Significance test summary ─────────────────────────────────────
