@@ -121,42 +121,37 @@ def pc_model(x, p, alpha, beta):
 # NIAS test  (Eq. 9)
 # ------------------------------------------------------------------------------
 
-def nias_test(summary_df, n_samples=100):
+def nias_test(summary_df, n_samples=100, alpha=0.05):
     """
     NIAS condition (Eq. 9):
         P(A=a | Y=1) >= (P(A=a | Y=2) + 2) / 3
 
-    In our label convention:
-        Y=1 (not hate, label=0):  P(A=a | Y=1) = P1b  (specificity)
-        Y=2 (hate,     label=1):  P(A=a | Y=2) = 1 - P1a
-
-    p-value tests H0: P(A=a|Y=1) = constraint  vs  H1: P(A=a|Y=1) != constraint
-    using an exact binomial test (n = n_samples / 2 per class).
+    A violation is declared only when BOTH hold:
+      1. P(A=a|Y=1) < constraint  (wrong direction)
+      2. One-sided binomial p-value < alpha  (statistically significant)
+    Otherwise: no significant violation.
     """
     rows = []
     n_per_class = n_samples // 2
 
     for _, row in summary_df.iterrows():
-        # New notation: P1a=P(a|S1), P2a=P(a|S2), P1b=P(b|S1), P2b=P(b|S2)
-        p_a_given_y1 = row["P1a"]   # P(A=a | Y=1) = P(pred NoHate | True NoHate)
-        p_a_given_y2 = row["P2a"]   # P(A=a | Y=2) = P(pred NoHate | True Hate)
+        p_a_given_y1 = row["P1a"]
+        p_a_given_y2 = row["P2a"]
         constraint   = (p_a_given_y2 + 2.0) / 3.0
-        holds        = p_a_given_y1 >= constraint
-
-        # Exact binomial p-value for H0: true prob = constraint
         k = int(round(p_a_given_y1 * n_per_class))
         try:
-            pval = binomtest(k, n_per_class, constraint).pvalue
+            # one-sided: H1 = P(A=a|Y=1) < constraint
+            pval = binomtest(k, n_per_class, constraint, alternative="less").pvalue
         except Exception:
             pval = float("nan")
-
+        violated = (p_a_given_y1 < constraint) and (not np.isnan(pval)) and (pval < alpha)
         rows.append({
-            "noise_p":           row["noise_p"],
-            "P(A=a|Y=1)":        round(p_a_given_y1, 4),
-            "P(A=a|Y=2)":        round(p_a_given_y2, 4),
-            "Constraint":        round(constraint, 4),
-            "NIAS_holds":        holds,
-            "p_value":           round(pval, 6) if not np.isnan(pval) else float("nan"),
+            "noise_p":    row["noise_p"],
+            "P(A=a|Y=1)": round(p_a_given_y1, 4),
+            "P(A=a|Y=2)": round(p_a_given_y2, 4),
+            "Constraint": round(constraint, 4),
+            "NIAS_holds": not violated,
+            "p_value":    round(pval, 6) if not np.isnan(pval) else float("nan"),
         })
 
     return pd.DataFrame(rows)
@@ -166,15 +161,22 @@ def nias_test(summary_df, n_samples=100):
 # Data loading
 # ------------------------------------------------------------------------------
 
-def load_summary(dir_name, label):
-    pattern = os.path.join(RESULTS_DIR, dir_name, f"summary_{dir_name}.csv")
+def load_summary(dir_name, label, results_dir=None, snr_mode=False):
+    base    = results_dir or RESULTS_DIR
+    pattern = os.path.join(base, dir_name, f"summary_{dir_name}.csv")
     files   = glob.glob(pattern)
     if not files:
         raise FileNotFoundError(
             f"No summary CSV for '{label}' at {pattern}\n"
-            "Run compute_metrics.py first."
+            "Run compute_metrics_audio.py first."
         )
-    df = pd.read_csv(files[0]).sort_values("noise_p").reset_index(drop=True)
+    df = pd.read_csv(files[0])
+    if snr_mode:
+        # SNR axis: higher = cleaner. Normalise to [0,1]: SNR_max→0, SNR_min→1
+        snr_max = df["noise_p"].max()
+        snr_min = df["noise_p"].min()
+        df["noise_p"] = (snr_max - df["noise_p"]) / (snr_max - snr_min)
+    df = df.sort_values("noise_p").reset_index(drop=True)
     return df
 
 
@@ -384,14 +386,26 @@ def save_nias(nias_results):
 # ------------------------------------------------------------------------------
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    global OUTPUT_DIR, RESULTS_DIR
+    import argparse
+    parser = argparse.ArgumentParser(description="Fit RI model and run NIAS test")
+    parser.add_argument("--results-dir", default=None,
+                        help=f"Results base dir (default: {RESULTS_DIR})")
+    parser.add_argument("--snr", action="store_true",
+                        help="Normalise SNR-axis noise_p to [0,1] before fitting")
+    args = parser.parse_args()
+    results_dir = args.results_dir or RESULTS_DIR
+    output_dir  = os.path.join(results_dir, "ri_fit")
+    os.makedirs(output_dir, exist_ok=True)
+    OUTPUT_DIR  = output_dir
+    RESULTS_DIR = results_dir
 
     models_data  = []
     nias_results = {}
 
     for label, dir_name in MODELS:
         try:
-            df = load_summary(dir_name, label)
+            df = load_summary(dir_name, label, results_dir, snr_mode=args.snr)
             models_data.append((label, df))
             nias_results[label] = nias_test(df)
             print(f"Loaded {label}: {len(df)} noise levels")

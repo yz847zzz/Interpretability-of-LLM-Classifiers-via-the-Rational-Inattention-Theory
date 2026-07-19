@@ -67,8 +67,17 @@ def _mutual_info(p1, p1a, p1b):
 
 
 def _noise_level(filename):
+    # text noise:  hate_speech_100_p_07.csv  → 0.7
     m = re.search(r"_p_(\d+)", filename)
-    return int(m.group(1)) / 10.0 if m else -1.0
+    if m:
+        return int(m.group(1)) / 10.0
+    # audio noise: hate_speech_100_snr_p30db.csv → SNR +30
+    #              hate_speech_100_snr_m05db.csv → SNR -5
+    m = re.search(r"snr_([mp])(\d+)db", filename)
+    if m:
+        sign = 1 if m.group(1) == "p" else -1
+        return sign * int(m.group(2))
+    return -999.0
 
 
 def compute_summary(model_dir, pred_col, model_label):
@@ -149,12 +158,15 @@ def main():
     )
     parser.add_argument("--gpt-model",    default=None, help=f"GPT model ID (default: {GPT_MODEL})")
     parser.add_argument("--gemini-model", default=None, help=f"Gemini model ID (default: {GEMINI_MODEL})")
+    parser.add_argument("--results-dir",  default=None, help=f"Results base dir (default: {RESULTS_DIR})")
     args = parser.parse_args()
+
+    results_dir = args.results_dir or RESULTS_DIR
 
     if args.model in ("gpt", "both"):
         tag = _make_tag(args.gpt_model or GPT_MODEL)
         compute_summary(
-            model_dir   = os.path.join(RESULTS_DIR, f"gpt_{tag}"),
+            model_dir   = os.path.join(results_dir, f"gpt_{tag}"),
             pred_col    = f"pred_gpt_{tag}",
             model_label = f"gpt_{tag}",
         )
@@ -162,7 +174,7 @@ def main():
     if args.model in ("gemini", "both"):
         tag = _make_tag(args.gemini_model or GEMINI_MODEL)
         compute_summary(
-            model_dir   = os.path.join(RESULTS_DIR, f"gemini_{tag}"),
+            model_dir   = os.path.join(results_dir, f"gemini_{tag}"),
             pred_col    = f"pred_gemini_{tag}",
             model_label = f"gemini_{tag}",
         )

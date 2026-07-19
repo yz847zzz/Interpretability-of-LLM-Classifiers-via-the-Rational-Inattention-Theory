@@ -112,7 +112,7 @@ def _classify_gpt_single(client, model, text):
     return 0
 
 
-def run_gpt(model=None):
+def run_gpt(model=None, input_dir=None, results_dir=None):
     from openai import OpenAI
 
     load_dotenv()
@@ -120,16 +120,18 @@ def run_gpt(model=None):
     if not api_key:
         raise ValueError("OPENAI_API_KEY not found in environment / .env")
 
+    input_dir   = input_dir   or NOISY_DIR
+    results_dir = results_dir or OUTPUT_DIR
     model = model or GPT_MODEL
     client = OpenAI(api_key=api_key)
     tag = re.sub(r"[^a-z0-9]+", "_", model.lower()).strip("_")
-    out_dir = os.path.join(OUTPUT_DIR, f"gpt_{tag}")
+    out_dir = os.path.join(results_dir, f"gpt_{tag}")
     pred_col = f"pred_gpt_{tag}"
     os.makedirs(out_dir, exist_ok=True)
 
-    files = sorted(glob.glob(os.path.join(NOISY_DIR, "hate_speech_*_p_*.csv")))
+    files = sorted(glob.glob(os.path.join(input_dir, "hate_speech_*.csv")))
     if not files:
-        raise FileNotFoundError(f"No noisy files in {NOISY_DIR}. Run add_text_noise.py first.")
+        raise FileNotFoundError(f"No files in {input_dir}.")
 
     print(f"=== GPT ({model}) — {len(files)} files, {MAX_WORKERS} parallel workers ===")
     for file_path in tqdm(files, desc="Files"):
@@ -212,7 +214,7 @@ def _classify_gemini_single(client, model, safety, text):
     return 0
 
 
-def run_gemini(model=None):
+def run_gemini(model=None, input_dir=None, results_dir=None):
     from google import genai
     from google.genai import types
 
@@ -221,6 +223,8 @@ def run_gemini(model=None):
     if not api_key:
         raise ValueError("GEMINI_API_KEY not found in environment / .env")
 
+    input_dir   = input_dir   or NOISY_DIR
+    results_dir = results_dir or OUTPUT_DIR
     model = model or GEMINI_MODEL
     client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000))
     safety = [
@@ -231,13 +235,13 @@ def run_gemini(model=None):
     ]
 
     tag = re.sub(r"[^a-z0-9]+", "_", model.lower()).strip("_")
-    out_dir = os.path.join(OUTPUT_DIR, f"gemini_{tag}")
+    out_dir = os.path.join(results_dir, f"gemini_{tag}")
     pred_col = f"pred_gemini_{tag}"
     os.makedirs(out_dir, exist_ok=True)
 
-    files = sorted(glob.glob(os.path.join(NOISY_DIR, "hate_speech_*_p_*.csv")))
+    files = sorted(glob.glob(os.path.join(input_dir, "hate_speech_*.csv")))
     if not files:
-        raise FileNotFoundError(f"No noisy files in {NOISY_DIR}. Run add_text_noise.py first.")
+        raise FileNotFoundError(f"No files in {input_dir}.")
 
     print(f"=== Gemini ({model}) — {len(files)} files, {MAX_WORKERS} parallel workers ===")
     for file_path in tqdm(files, desc="Files"):
@@ -277,12 +281,14 @@ def main():
     )
     parser.add_argument("--gpt-model",    default=None, help=f"GPT model ID (default: {GPT_MODEL})")
     parser.add_argument("--gemini-model", default=None, help=f"Gemini model ID (default: {GEMINI_MODEL})")
+    parser.add_argument("--input-dir",    default=None, help=f"Input CSV dir (default: {NOISY_DIR})")
+    parser.add_argument("--results-dir",  default=None, help=f"Results output dir (default: {OUTPUT_DIR})")
     args = parser.parse_args()
 
     if args.model in ("gpt", "both"):
-        run_gpt(model=args.gpt_model)
+        run_gpt(model=args.gpt_model, input_dir=args.input_dir, results_dir=args.results_dir)
     if args.model in ("gemini", "both"):
-        run_gemini(model=args.gemini_model)
+        run_gemini(model=args.gemini_model, input_dir=args.input_dir, results_dir=args.results_dir)
 
 
 if __name__ == "__main__":
