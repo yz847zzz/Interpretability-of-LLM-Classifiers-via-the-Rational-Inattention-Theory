@@ -45,6 +45,15 @@ MODELS = [
     ("Gemini-2.5-Flash-Lite", "gemini_gemini_2_5_flash_lite"),
 ]
 
+# Input token price ($/1M tokens, standard tier, July 2026)
+# r is used as the reward in the RI model: λ = r / x
+PRICE_MAP = {
+    "GPT-3.5-turbo":         0.50,
+    "GPT-5.4-nano":          0.20,
+    "Gemini-2.5-Flash":      0.30,
+    "Gemini-2.5-Flash-Lite": 0.10,
+}
+
 LB_X     = 1e-6;  UB_X     = 100.0
 LB_ALPHA = 0.01;  UB_ALPHA = 50.0
 LB_BETA  = 0.1;   UB_BETA  = 3.0
@@ -227,8 +236,9 @@ def bootstrap_noise(noise_type, B, rng, noise_data=None):
 
         row = {}
         for i, label in enumerate(labels):
-            x = res["x"][i]
-            row[f"lambda_{label}"] = 1.0 / x if x > 0 else np.nan
+            x     = res["x"][i]
+            price = PRICE_MAP.get(label, 1.0)
+            row[f"lambda_{label}"] = price / x if x > 0 else np.nan
             row[f"x_{label}"]      = x
         row["alpha"] = res["alpha"]
         row["beta"]  = res["beta"]
