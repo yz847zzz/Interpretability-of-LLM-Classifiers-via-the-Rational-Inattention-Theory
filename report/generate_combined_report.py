@@ -32,7 +32,7 @@ BASE        = "./Dataset/results"
 AUDIO_SUM   = f"{BASE}/bootstrap/bootstrap_summary.csv"
 AUDIO_MOD   = f"{BASE}/bootstrap/pairwise_model_tests.csv"
 AUDIO_CROSS = f"{BASE}/bootstrap/pairwise_tests.csv"
-OUT_PATH    = f"{BASE}/paper_report_v4.docx"
+OUT_PATH    = f"{BASE}/paper_report_v5.docx"
 
 NOISE_ORDER  = ["white",  "babble",  "cafe"]
 NOISE_LABELS = {"white": "White Noise", "babble": "Babble Noise", "cafe": "Café Noise"}
@@ -380,9 +380,11 @@ def main():
     h(doc, "4b. Estimated RI Parameters (Bootstrap SE and 95% CI)", 2)
     p(doc,
       "Table 1 reports the jointly estimated RI parameters for each noise condition. "
-      "Standard errors and 95% CIs are obtained from B = 1,000 bootstrap replicates "
+      "λ = r/x where r = input token price ($/1M tokens) and x is the directly fitted "
+      "RI decision parameter; see Section 4b-ii for motivation. "
+      "Standard errors and 95% CIs are from B = 1,000 bootstrap replicates "
       "(percentile method, Efron & Tibshirani, 1993). "
-      "λ is the per-model information cost; α and β are shared environment parameters.",
+      "α and β are shared environment parameters.",
       size=10)
 
     doc.add_paragraph()
@@ -420,278 +422,153 @@ def main():
 
     doc.add_paragraph()
 
-    # ── Token price vs lambda comparison ──────────────────────────────────
-    h(doc, "4b-ii. Token Price vs. Estimated Information Cost (λ)", 2)
+    # ── 4b-ii. Token Price as Reward: λ = r/x ─────────────────────────────
+    h(doc, "4b-ii. Token Price as Reward and the True Information Cost (λ)", 2)
+
+    import numpy as np
+
+    PRICE_MAP = {"GPT-3.5-turbo": 0.50, "GPT-5.4-nano": 0.20,
+                 "Gemini-2.5-Flash": 0.30, "Gemini-2.5-Flash-Lite": 0.10}
+
     p(doc,
-      "Table 2 compares the estimated λ (averaged across the three noise conditions) "
-      "with the official API input-token price for each model (standard tier, July 2026). "
-      "Because the classification prompt instructs each LLM to return only a single "
-      'JSON field — {"label": 0 or 1} — with a hard cap of 16 output tokens, '
-      "output cost is negligible and the effective per-call cost is determined "
-      "entirely by the input price. "
-      "The token price reflects the provider's compute charge, while λ captures the "
-      "LLM's behavioural information-processing cost inferred from its classification "
-      "decisions — they measure fundamentally different quantities.",
+      "Choice of reward r.  "
+      "In the RI framework the fitted parameter is x = r / λ, where r is the reward "
+      "the decision-maker obtains for a correct classification. "
+      "A natural, model-specific choice of r is the API input token price ($/1M tokens): "
+      "because the classification prompt is identical for all models and single-digit "
+      'JSON output (≤16 tokens) makes output cost negligible, the effective monetary '
+      "cost of each decision is determined entirely by the input price. "
+      "Setting r = token price for each model and keeping the directly fitted x, "
+      "the true information cost is:",
+      size=10)
+
+    p(doc,
+      "    λ = r / x   (r = input token price, $/1M tokens)",
+      bold=True, size=10)
+
+    p(doc,
+      "This replaces the r = 1 normalisation used in early analyses. "
+      "All λ values in Table 1 and throughout this paper use this definition. "
+      "SE propagation: the bootstrap distribution of x is available from B = 1,000 "
+      "replicates; λ = r/x is a monotone transformation, so the bootstrap distribution "
+      "of λ is obtained directly, and SE(λ) = std of the bootstrap λ distribution.",
       size=10)
 
     doc.add_paragraph()
 
-    # Token price table (input only; output ignored — max 16 tokens per call)
-    # Prices fetched July 2026: openai.com/api/pricing, cloud.google.com/vertex-ai/generative-ai/pricing
-    PRICE_DATA = [
-        # (display name, input_$/1M, note)
-        ("GPT-3.5-turbo",         0.50, "deprecated"),
-        ("GPT-5.4-nano",          0.20, ""),
-        ("Gemini-2.5-Flash",      0.30, ""),
-        ("Gemini-2.5-Flash-Lite", 0.10, ""),
-    ]
-
-    import numpy as np
-
-    # Build per-condition lambda data
-    lam_full = (aud_sum[aud_sum["param"].str.startswith("lambda_")].copy())
+    # Build averaged λ and x per model
+    lam_full = aud_sum[aud_sum["param"].str.startswith("lambda_")].copy()
     lam_full["model"] = lam_full["param"].str.replace("lambda_", "")
-    PRICE_MAP = {"GPT-3.5-turbo": 0.50, "GPT-5.4-nano": 0.20,
-                 "Gemini-2.5-Flash": 0.30, "Gemini-2.5-Flash-Lite": 0.10}
-    lam_full["price"]   = lam_full["model"].map(PRICE_MAP)
-    lam_full["lam_w"]   = lam_full["price"] * lam_full["estimate"]
-    lam_full["se_w"]    = lam_full["price"] * lam_full["se"]
-    lam_full["ci_lo_w"] = lam_full["price"] * lam_full["ci_lo"]
-    lam_full["ci_hi_w"] = lam_full["price"] * lam_full["ci_hi"]
+    lam_full["price"] = lam_full["model"].map(PRICE_MAP)
 
-    # Build per-condition x data (x = r/λ, directly estimated parameter)
     x_full = aud_sum[aud_sum["param"].str.startswith("x_")].copy()
     x_full["model"] = x_full["param"].str.replace("x_", "")
-    x_full["price"]    = x_full["model"].map(PRICE_MAP)
-    x_full["lam_w_i"]  = x_full["price"] / x_full["estimate"]          # λ_w = r/x
-    x_full["se_lw_i"]  = x_full["price"] / (x_full["estimate"] ** 2) * x_full["se"]  # delta method
 
-    # Average across 3 noise types with correct SE propagation:
-    #   λ_avg  = (λ_w + λ_b + λ_c) / 3   (independent conditions)
-    #   SE_avg = sqrt(SE_w² + SE_b² + SE_c²) / 3
     def avg_se_propagated(series):
         return np.sqrt((series ** 2).sum()) / len(series)
 
-    lam_avg_df = lam_full.groupby("model").agg(
+    lam_avg = lam_full.groupby("model").agg(
         price    = ("price",    "first"),
         lam_mean = ("estimate", "mean"),
         se_mean  = ("se",       avg_se_propagated),
     ).reset_index()
 
-    # Table 3 aggregation: average x and λ_w = r/x across noise conditions
-    x_avg_df = x_full.groupby("model").agg(
-        price   = ("price",    "first"),
-        x_avg   = ("estimate", "mean"),
-        lam_w   = ("lam_w_i", "mean"),
-        se_w    = ("se_lw_i", avg_se_propagated),
+    x_avg = x_full.groupby("model").agg(
+        x_mean = ("estimate", "mean"),
     ).reset_index()
 
-    lw_avg_df = lam_full.groupby("model").agg(
-        price    = ("price",  "first"),
-        lam_old  = ("estimate","mean"),
-        lam_w    = ("lam_w",  "mean"),
-        se_w     = ("se_w",   avg_se_propagated),
-    ).reset_index()
+    cmp_df = lam_avg.merge(x_avg, on="model")
+    cmp_df = cmp_df.sort_values("lam_mean").reset_index(drop=True)
+    cmp_df["lam_rank"] = range(1, len(cmp_df) + 1)
+    cmp_df["x_rank"]   = cmp_df["x_mean"].rank(ascending=False).astype(int)
 
-    # ── Table 2: λ vs token price ──────────────────────────────────────────
-    price_rows = []
-    for (name, inp, note) in PRICE_DATA:
-        row = lam_avg_df[lam_avg_df["model"] == name]
-        if not row.empty:
-            lv = row["lam_mean"].values[0]
-            ls = row["se_mean"].values[0]
-        else:
-            lv, ls = float("nan"), float("nan")
-        price_rows.append((name, lv, ls, inp, note))
-
-    price_rows.sort(key=lambda x: x[1])   # sort by λ ascending
-
-    sorted_by_price  = sorted(price_rows, key=lambda x: x[3])
-    price_rank_map   = {r[0]: i + 1 for i, r in enumerate(sorted_by_price)}
-
-    price_cols = ["Model", "λ (avg ± SE)", "Input $/1M tokens",
-                  "λ rank", "Price rank", "Note"]
-    pt = doc.add_table(rows=1, cols=len(price_cols))
-    pt.style = "Table Grid"
-    hdr_row(pt, price_cols)
-
-    for i, (name, lv, ls, inp, note) in enumerate(price_rows):
-        lam_str = f"{lv:.4f} ± {ls:.4f}"
-        data_row(pt,
-                 [name, lam_str, f"${inp:.2f}",
-                  str(i + 1), str(price_rank_map[name]), note],
-                 center_cols=[1, 2, 3, 4])
-
-    col_widths(pt, [1.85, 1.40, 1.35, 0.75, 0.85, 0.95])
+    # ── Table 2: x vs λ comparison ────────────────────────────────────────
     p(doc,
-      "Table 2. Input token prices from official provider pricing pages (July 2026, standard tier). "
-      "Output tokens ignored: prompt enforces single-digit JSON output (≤16 tokens). "
-      "λ rank: 1 = lowest λ = most decision-efficient. "
-      "Price rank: 1 = cheapest input price. "
-      "Sources: openai.com/api/pricing; cloud.google.com/vertex-ai/generative-ai/pricing.",
-      italic=True, size=9)
-
-    doc.add_paragraph()
-
-    # Formula note for Table 2 SE
-    p(doc,
-      "SE derivation for averaged λ (Table 2).  "
-      "Each model's λ is estimated independently for the three noise conditions "
-      "(white, babble, café). "
-      "The average λ_avg = (λ_w + λ_b + λ_c) / 3. "
-      "Because the three bootstrap procedures are independent, variances add:",
-      size=10)
-    p(doc,
-      "    SE(λ_avg) = sqrt( SE_white² + SE_babble² + SE_café² ) / 3",
-      bold=True, size=10)
-    p(doc,
-      "This is the standard error of the mean of three independent estimates "
-      "(error propagation for a linear combination with equal weights 1/3).",
+      "Table 2 shows, for each model, the directly fitted x (raw decision efficiency "
+      "under r = 1), the token price r, and the resulting λ = r/x averaged across the "
+      "three noise conditions. "
+      "Larger x means the model attains higher decision accuracy per unit information "
+      "cost under a unit reward. "
+      "λ = r/x rescales x by the monetary reward: a cheap model with large x can still "
+      "carry a low λ if its price is low enough.",
       size=10)
 
-    doc.add_paragraph()
+    cmp_cols = ["Model", "x (fitted, avg)", "r ($/1M tok)",
+                "λ = r/x (avg ± SE)", "x rank", "λ rank"]
+    ct = doc.add_table(rows=1, cols=len(cmp_cols))
+    ct.style = "Table Grid"
+    hdr_row(ct, cmp_cols)
 
-    p(doc,
-      "Key observation (Table 2):  Input token price and λ do not share the same "
-      "ordering, indicating that token cost and decision efficiency capture distinct "
-      "properties of LLM behaviour. "
-      "GPT-3.5-turbo is the most expensive model per token ($0.50/M) yet achieves "
-      "the lowest λ (rank 1) — it extracts decision-relevant information most "
-      "efficiently from noisy input. "
-      "GPT-5.4-nano has the highest λ (rank 4) despite costing only $0.20/M. "
-      "Within the Gemini family the rankings are consistent: "
-      "Gemini-2.5-Flash ($0.30/M) is both more expensive and more decision-efficient "
-      "than Gemini-2.5-Flash-Lite ($0.10/M).",
-      size=10)
-
-    doc.add_paragraph()
-
-    # ── Price-weighted lambda (lambda_w) intro ─────────────────────────────
-    p(doc,
-      "Price-weighted information cost (λ_w).  "
-      "In the RI model, the decision parameter is x = r / λ, where r is the reward "
-      "for a correct decision. Our baseline estimation assumes r = 1 uniformly across "
-      "models. However, because the prompt enforces identical single-digit output and "
-      "input length is the same text for all models, the effective per-call cost is "
-      "entirely determined by the input token price. "
-      "Setting r = input price ($/1M tokens) as a model-specific reward, "
-      "and keeping the fitted x unchanged, gives:",
-      size=10)
-
-    p(doc,
-      "    λ_w = r / x",
-      bold=True, size=10)
-
-    p(doc,
-      "λ_w measures the information cost in the same monetary units as the token "
-      "price: a model with low λ_w processes each bit of decision-relevant "
-      "information at low monetary cost.",
-      size=10)
-
-    doc.add_paragraph()
-
-    # ── Table 3: λ_w summary sorted by λ_w, with ranks ────────────────────
-    lw_sorted = x_avg_df.sort_values("lam_w").reset_index(drop=True)
-
-    sorted_by_price_lw = x_avg_df.sort_values("price", ascending=True).reset_index(drop=True)
-    price_rank_lw = {r["model"]: i + 1
-                     for i, r in sorted_by_price_lw.iterrows()}
-
-    lw_cols = ["Model", "x (fitted)", "r ($/1M tok)", "λ_w = r/x  (avg ± SE)",
-               "λ_w rank", "Price rank"]
-    lt = doc.add_table(rows=1, cols=len(lw_cols))
-    lt.style = "Table Grid"
-    hdr_row(lt, lw_cols)
-
-    for i, row in lw_sorted.iterrows():
-        m = row["model"]
-        data_row(lt,
-                 [m,
-                  f"{row['x_avg']:.4f}",
+    for _, row in cmp_df.iterrows():
+        data_row(ct,
+                 [row["model"],
+                  f"{row['x_mean']:.4f}",
                   f"${row['price']:.2f}",
-                  f"{row['lam_w']:.4f} ± {row['se_w']:.4f}",
-                  str(i + 1),
-                  str(price_rank_lw[m])],
+                  f"{row['lam_mean']:.4f} ± {row['se_mean']:.4f}",
+                  str(int(row["x_rank"])),
+                  str(int(row["lam_rank"]))],
                  center_cols=[1, 2, 3, 4, 5])
 
-    col_widths(lt, [1.85, 0.90, 1.05, 1.75, 0.85, 0.85])
+    col_widths(ct, [1.85, 1.25, 1.05, 1.75, 0.80, 0.80])
     p(doc,
-      "Table 3. Price-weighted information cost λ_w = r/x, sorted by λ_w ascending. "
-      "x = r/λ is the directly estimated RI parameter (with r=1 in baseline fitting). "
-      "λ_w rank: 1 = lowest λ_w = most cost-efficient. "
-      "Price rank: 1 = cheapest input price.",
+      "Table 2. Comparison of fitted x (raw, r=1) and λ = r/x (price-adjusted), "
+      "averaged across white, babble, and café noise conditions. "
+      "x rank: 1 = largest x = highest raw decision efficiency. "
+      "λ rank: 1 = smallest λ = lowest price-adjusted information cost. "
+      "Sources: openai.com/api/pricing; cloud.google.com/vertex-ai/generative-ai/pricing "
+      "(standard tier, July 2026; output tokens ignored).",
       italic=True, size=9)
 
     doc.add_paragraph()
 
-    # Formula note for Table 3 SE
+    # Interpretation
+    most_eff  = cmp_df.iloc[0]
+    least_eff = cmp_df.iloc[-1]
     p(doc,
-      "SE derivation for λ_w (Table 3).  "
-      "x is the directly estimated parameter; λ_w = r/x, so by the delta method:",
-      size=10)
-    p(doc,
-      "    SE(λ_w) = (r / x²) · SE(x)              [per noise condition]\n"
-      "    SE(λ_w_avg) = sqrt( SE(λ_w,w)² + SE(λ_w,b)² + SE(λ_w,c)² ) / 3",
-      bold=True, size=10)
-    p(doc,
-      "where SE(λ_w,k) = (r / x_k²) · SE(x_k) for noise condition k ∈ {white, babble, café}. "
-      "This applies the delta method for g(x) = r/x, giving g'(x) = −r/x², "
-      "and combines the per-condition SEs using the independent-estimates propagation rule.",
+      f"Key observation (Table 2):  The ranking by raw decision efficiency x and by "
+      f"price-adjusted information cost λ diverge. "
+      f"GPT-3.5-turbo has the largest x (x rank 1) — the highest raw decision accuracy "
+      f"per unit information cost — but its high price ($0.50/M) places it at "
+      f"λ rank {int(cmp_df[cmp_df['model']=='GPT-3.5-turbo']['lam_rank'].values[0])}. "
+      f"Gemini-2.5-Flash-Lite, with the smallest x yet the cheapest price ($0.10/M), "
+      f"achieves the lowest λ (rank 1), making it the most cost-efficient model "
+      f"in the price-adjusted sense. "
+      f"This reranking shows that monetary cost dominates raw efficiency differences "
+      f"at the price levels observed.",
       size=10)
 
     doc.add_paragraph()
 
-    # ── Table 4: λ_w per noise condition, model order = MODEL_ORDER ────────
-    lw_noise_cols = ["Model", "r ($/1M tok)"] + [NOISE_LABELS[n] for n in NOISE_ORDER]
-    lt2 = doc.add_table(rows=1, cols=len(lw_noise_cols))
-    lt2.style = "Table Grid"
-    hdr_row(lt2, lw_noise_cols)
+    # ── Table 3: per-noise λ breakdown ────────────────────────────────────
+    p(doc, "Table 3 shows λ = r/x for each model and noise condition separately.",
+      size=10)
 
-    for m in MODEL_ORDER:          # same order as Table 1
-        row_avg = lw_avg_df[lw_avg_df["model"] == m]
-        price_str = f"${row_avg['price'].values[0]:.2f}" if not row_avg.empty else "—"
-        vals = [m, price_str]
+    lam_noise_cols = ["Model", "r ($/1M tok)"] + [NOISE_LABELS[n] for n in NOISE_ORDER]
+    lt3 = doc.add_table(rows=1, cols=len(lam_noise_cols))
+    lt3.style = "Table Grid"
+    hdr_row(lt3, lam_noise_cols)
+
+    for m in MODEL_ORDER:
+        price_val = PRICE_MAP.get(m, float("nan"))
+        vals = [m, f"${price_val:.2f}"]
         for noise in NOISE_ORDER:
             sub = lam_full[(lam_full["model"] == m) & (lam_full["noise"] == noise)]
             if not sub.empty:
                 r = sub.iloc[0]
-                vals.append(f"{r['lam_w']:.4f} ± {r['se_w']:.4f}\n"
-                            f"[{r['ci_lo_w']:.4f}, {r['ci_hi_w']:.4f}]")
+                vals.append(f"{r['estimate']:.4f} ± {r['se']:.4f}\n"
+                            f"[{r['ci_lo']:.4f}, {r['ci_hi']:.4f}]")
             else:
                 vals.append("—")
-        data_row(lt2, vals, center_cols=[1, 2, 3, 4])
+        data_row(lt3, vals, center_cols=[1, 2, 3, 4])
 
-    col_widths(lt2, [1.85, 1.05, 1.55, 1.55, 1.55])
+    col_widths(lt3, [1.85, 1.05, 1.55, 1.55, 1.55])
     p(doc,
-      "Table 4. λ_w per noise condition (estimate ± SE  [95% CI]). "
-      "Model order matches Table 1.",
+      "Table 3. λ = r/x per noise condition (estimate ± Bootstrap SE  [95% CI]). "
+      "Model order matches Table 1. "
+      "SE is the standard deviation of the bootstrap distribution of λ = r/x.",
       italic=True, size=9)
 
     doc.add_paragraph()
-
-    # Interpretation — use lw_sorted already computed above
-    most_eff  = lw_sorted.iloc[0]
-    least_eff = lw_sorted.iloc[-1]
-    gpt35_lw_rank  = int(lw_sorted[lw_sorted["model"]=="GPT-3.5-turbo"].index[0]) + 1
-    flash_lite_rank = int(lw_sorted[lw_sorted["model"]=="Gemini-2.5-Flash-Lite"].index[0]) + 1
-
-    p(doc,
-      f"Key observation (Tables 3 & 4):  When reward is set to token price, "
-      f"the ranking of models by information cost changes substantially. "
-      f"{most_eff['model']} achieves the lowest λ_w "
-      f"({most_eff['lam_w']:.4f}), making it the most cost-efficient model — "
-      f"it processes each bit of decision-relevant information at the lowest "
-      f"monetary cost. "
-      f"{least_eff['model']} has the highest λ_w ({least_eff['lam_w']:.4f}): "
-      f"its high token price amplifies its already-elevated baseline λ. "
-      f"Comparing Tables 2 and 3, GPT-3.5-turbo drops from λ rank 1 (most "
-      f"decision-efficient under r=1) to λ_w rank {gpt35_lw_rank} "
-      f"once its price premium is factored in, while Gemini-2.5-Flash-Lite "
-      f"rises to λ_w rank {flash_lite_rank} due to its low token price. "
-      f"λ_w thus provides a unified, price-adjusted measure of LLM decision "
-      f"efficiency that is directly comparable across providers.",
-      size=10)
-
     doc.add_paragraph()
 
     # ── 4c. Significance test summary ─────────────────────────────────────

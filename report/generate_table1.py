@@ -1,19 +1,14 @@
 """
-Generate Table 1: estimated RI parameters per noise condition.
+Recompute all bootstrap-derived outputs using λ = r/x (r = token price).
 
-λ = r / x  where r = input token price ($/1M tokens) and x is the directly
-fitted RI decision parameter.  This replaces the r=1 assumption used in the
-original bootstrap run.  No refitting is needed — x values are reused from
-bootstrap_raw.csv; only the λ = r/x mapping changes.
-
-Steps
------
-1. Read bootstrap_raw.csv  (contains x_<model> columns per replicate)
-2. Recompute λ_<model> = price / x_<model> for each replicate
-3. Point estimates come from original_estimates.csv (x columns), same mapping
-4. SE and 95% CI from the recomputed bootstrap distribution
-5. Overwrite bootstrap_summary.csv with updated λ values
-6. Print Table 1 and save table1.csv
+No bootstrap rerun needed — x values already exist in bootstrap_raw.csv.
+This script:
+  1. Recomputes λ = price/x for every bootstrap replicate
+  2. Updates bootstrap_summary.csv, original_estimates.csv
+  3. Recomputes and saves:
+       pairwise_model_tests.csv  — within-noise pairwise λ tests (Appendix 1)
+       pairwise_tests.csv        — cross-noise same-param tests  (Appendix 2)
+  4. Prints Table 1 and saves table1.csv
 
 Usage
 -----
@@ -23,15 +18,18 @@ Usage
 import os
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-BOOT_DIR   = "./Dataset/results/bootstrap"
-RAW_CSV    = os.path.join(BOOT_DIR, "bootstrap_raw.csv")
-ORIG_CSV   = os.path.join(BOOT_DIR, "original_estimates.csv")
-SUMM_CSV   = os.path.join(BOOT_DIR, "bootstrap_summary.csv")
-OUT_TABLE1 = os.path.join(BOOT_DIR, "table1.csv")
+BOOT_DIR    = "./Dataset/results/bootstrap"
+RAW_CSV     = os.path.join(BOOT_DIR, "bootstrap_raw.csv")
+ORIG_CSV    = os.path.join(BOOT_DIR, "original_estimates.csv")
+SUMM_CSV    = os.path.join(BOOT_DIR, "bootstrap_summary.csv")
+PAIR_MODEL  = os.path.join(BOOT_DIR, "pairwise_model_tests.csv")
+PAIR_NOISE  = os.path.join(BOOT_DIR, "pairwise_tests.csv")
+OUT_TABLE1  = os.path.join(BOOT_DIR, "table1.csv")
 
 MODELS = [
     "GPT-3.5-turbo",
@@ -40,12 +38,11 @@ MODELS = [
     "Gemini-2.5-Flash-Lite",
 ]
 
-# r = input token price ($/1M tokens, standard tier, July 2026)
-# In the RI model: x = r / λ  →  λ = r / x
-# Using token price as r because: identical prompts mean per-call cost is
-# proportional to input price; output is a single JSON digit (≤16 tokens),
-# so output cost is negligible.  r therefore reflects the monetary reward
-# the provider effectively charges per decision.
+# r = input token price ($/1M tokens, standard tier, July 2026).
+# Justification: all prompts are identical → per-call cost ∝ input price;
+# output is a single JSON digit (≤16 tokens), so output cost is negligible.
+# r therefore represents the monetary reward the provider charges per decision,
+# and λ = r/x gives the true price-adjusted information cost.
 PRICE_MAP = {
     "GPT-3.5-turbo":         0.50,
     "GPT-5.4-nano":          0.20,
@@ -58,70 +55,55 @@ NOISE_LABELS = {"white": "White noise", "babble": "Babble noise", "cafe": "Café
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Recompute bootstrap distribution of λ = r/x
+# Helpers
 # ---------------------------------------------------------------------------
 
 def recompute_lambda_boot(raw_df):
-    """Return a copy of raw_df with lambda columns replaced by r/x."""
+    """Replace lambda_<model> = 1/x with price/x in every replicate."""
     df = raw_df.copy()
     for m in MODELS:
         xcol = f"x_{m}"
         lcol = f"lambda_{m}"
         if xcol not in df.columns:
-            print(f"  WARNING: {xcol} not found in bootstrap_raw.csv")
+            print(f"  WARNING: {xcol} missing in bootstrap_raw.csv")
             continue
-        price = PRICE_MAP[m]
-        df[lcol] = np.where(df[xcol] > 0, price / df[xcol], np.nan)
+        df[lcol] = np.where(df[xcol] > 0, PRICE_MAP[m] / df[xcol], np.nan)
     return df
 
 
-# ---------------------------------------------------------------------------
-# Step 2: Point estimates from original full-data fit
-# ---------------------------------------------------------------------------
-
 def build_point_estimates(orig_df):
     """
-    Returns dict:  {noise: {param: value}}
-    lambda params are recomputed as price/x; x and alpha/beta are kept as-is.
+    Return {noise: {param: value}} with lambda recomputed as price/x.
     """
     estimates = {}
     for _, row in orig_df.iterrows():
-        noise, param, val = row["noise"], row["param"], row["estimate"]
-        estimates.setdefault(noise, {})[param] = val
+        estimates.setdefault(row["noise"], {})[row["param"]] = row["estimate"]
 
-    # recompute lambda = price/x for each noise condition
     for noise in NOISE_TYPES:
         if noise not in estimates:
             continue
         for m in MODELS:
-            xkey = f"x_{m}"
-            lkey = f"lambda_{m}"
-            if xkey in estimates[noise]:
-                x = estimates[noise][xkey]
-                estimates[noise][lkey] = PRICE_MAP[m] / x if x > 0 else np.nan
+            xk, lk = f"x_{m}", f"lambda_{m}"
+            if xk in estimates[noise]:
+                x = estimates[noise][xk]
+                estimates[noise][lk] = PRICE_MAP[m] / x if x > 0 else np.nan
 
     return estimates
 
 
-# ---------------------------------------------------------------------------
-# Step 3: Build summary (point est + bootstrap SE + 95% CI)
-# ---------------------------------------------------------------------------
-
 def build_summary(boot_df, point_estimates):
     rows = []
     for noise in NOISE_TYPES:
-        sub = boot_df[boot_df["noise"] == noise] if "noise" in boot_df.columns else boot_df
+        sub = boot_df[boot_df["noise"] == noise]
         pt  = point_estimates.get(noise, {})
-
-        param_cols = [c for c in boot_df.columns if c != "noise"]
-        for param in param_cols:
+        for param in [c for c in boot_df.columns if c != "noise"]:
             vals = sub[param].dropna().values
             orig = pt.get(param, np.nan)
             rows.append({
                 "noise":    noise,
                 "param":    param,
-                "estimate": round(float(orig),              6),
-                "se":       round(float(vals.std(ddof=1)),  6),
+                "estimate": round(float(orig),             6),
+                "se":       round(float(vals.std(ddof=1)), 6),
                 "ci_lo":    round(float(np.percentile(vals, 2.5)),  6),
                 "ci_hi":    round(float(np.percentile(vals, 97.5)), 6),
             })
@@ -129,25 +111,115 @@ def build_summary(boot_df, point_estimates):
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Format and print Table 1
+# Pairwise tests
+# ---------------------------------------------------------------------------
+
+def _z_and_ci(va, vb, est_a, est_b):
+    se_a = va.std(ddof=1)
+    se_b = vb.std(ddof=1)
+    se_d = np.sqrt(se_a**2 + se_b**2)
+    obs  = est_a - est_b
+    z    = obs / se_d if se_d > 0 else np.nan
+    p_z  = float(2 * norm.sf(abs(z))) if not np.isnan(z) else np.nan
+    B    = min(len(va), len(vb))
+    D    = va[:B] - vb[:B]
+    ci_lo = float(np.percentile(D, 2.5))
+    ci_hi = float(np.percentile(D, 97.5))
+    return se_a, se_b, z, p_z, ci_lo, ci_hi
+
+
+def pairwise_within_noise(boot_dfs, point_estimates):
+    """Appendix 1: compare all λ model-pairs within each noise condition."""
+    lambda_cols  = [f"lambda_{m}" for m in MODELS]
+    model_pairs  = [(MODELS[i], MODELS[j])
+                    for i in range(len(MODELS))
+                    for j in range(i + 1, len(MODELS))]
+    rows = []
+    for noise, df in boot_dfs.items():
+        orig = point_estimates.get(noise, {})
+        for ma, mb in model_pairs:
+            ca, cb = f"lambda_{ma}", f"lambda_{mb}"
+            if ca not in df.columns or cb not in df.columns:
+                continue
+            va  = df[ca].dropna().values
+            vb  = df[cb].dropna().values
+            ea  = orig.get(ca, np.nan)
+            eb  = orig.get(cb, np.nan)
+            se_a, se_b, z, p_z, ci_lo, ci_hi = _z_and_ci(va, vb, ea, eb)
+            rows.append({
+                "noise":       noise,
+                "model_A":     ma,
+                "model_B":     mb,
+                "lambda_A":    round(ea,          6),
+                "lambda_B":    round(eb,          6),
+                "obs_diff":    round(ea - eb,     6),
+                "se_A":        round(se_a,        6),
+                "se_B":        round(se_b,        6),
+                "z_stat":      round(z,    4) if not np.isnan(z)   else np.nan,
+                "p_z":         round(p_z,  6) if not np.isnan(p_z) else np.nan,
+                "sig_z_0.05":  p_z < 0.05  if not np.isnan(p_z)   else False,
+                "ci_lo_diff":  round(ci_lo, 6),
+                "ci_hi_diff":  round(ci_hi, 6),
+                "sig_ci":      (ci_lo > 0) or (ci_hi < 0),
+            })
+    return pd.DataFrame(rows)
+
+
+def pairwise_across_noise(boot_dfs, point_estimates):
+    """Appendix 2: compare same parameter across noise conditions."""
+    noises = list(boot_dfs.keys())
+    noise_pairs = [(noises[i], noises[j])
+                   for i in range(len(noises))
+                   for j in range(i + 1, len(noises))]
+
+    param_cols = [f"lambda_{m}" for m in MODELS] + ["alpha", "beta"]
+
+    rows = []
+    for na, nb in noise_pairs:
+        dfa  = boot_dfs[na]
+        dfb  = boot_dfs[nb]
+        oa   = point_estimates.get(na, {})
+        ob   = point_estimates.get(nb, {})
+
+        for param in param_cols:
+            if param not in dfa.columns or param not in dfb.columns:
+                continue
+            va  = dfa[param].dropna().values
+            vb  = dfb[param].dropna().values
+            ea  = oa.get(param, np.nan)
+            eb  = ob.get(param, np.nan)
+            se_a, se_b, z, p_z, ci_lo, ci_hi = _z_and_ci(va, vb, ea, eb)
+            rows.append({
+                "noise_A":    na,
+                "noise_B":    nb,
+                "param":      param,
+                "est_A":      round(ea,       6),
+                "est_B":      round(eb,       6),
+                "obs_diff":   round(ea - eb,  6),
+                "z_stat":     round(z,    4) if not np.isnan(z)   else np.nan,
+                "p_z":        round(p_z,  6) if not np.isnan(p_z) else np.nan,
+                "sig_z_0.05": p_z < 0.05  if not np.isnan(p_z)   else False,
+                "ci_lo_diff": round(ci_lo, 6),
+                "ci_hi_diff": round(ci_hi, 6),
+                "sig_ci":     (ci_lo > 0) or (ci_hi < 0),
+            })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Table 1 formatting
 # ---------------------------------------------------------------------------
 
 def format_table1(summary_df):
-    """
-    Table 1: rows = λ per model + α + β,  cols = noise conditions.
-    Cell format: estimate ± SE  [ci_lo, ci_hi]
-    """
-    param_order = [f"lambda_{m}" for m in MODELS] + ["alpha", "beta"]
-    param_labels = {f"lambda_{m}": f"λ  {m}  (r=${PRICE_MAP[m]:.2f})" for m in MODELS}
-    param_labels["alpha"] = "α  (shared)"
-    param_labels["beta"]  = "β  (shared)"
+    param_order  = [f"lambda_{m}" for m in MODELS] + ["alpha", "beta"]
+    param_labels = {f"lambda_{m}": f"lambda  {m}  (r=${PRICE_MAP[m]:.2f})"
+                    for m in MODELS}
+    param_labels["alpha"] = "alpha  (shared)"
+    param_labels["beta"]  = "beta   (shared)"
 
     header = ["Parameter"] + [NOISE_LABELS[n] for n in NOISE_TYPES]
     rows   = []
-
     for param in param_order:
-        if param not in param_labels:
-            continue
         row = [param_labels[param]]
         for noise in NOISE_TYPES:
             r = summary_df[(summary_df["noise"] == noise) &
@@ -155,29 +227,27 @@ def format_table1(summary_df):
             if r.empty:
                 row.append("—")
             else:
-                e  = r.iloc[0]
-                row.append(f"{e['estimate']:.4f} ± {e['se']:.4f}\n"
+                e = r.iloc[0]
+                row.append(f"{e['estimate']:.4f} +/- {e['se']:.4f}\n"
                             f"[{e['ci_lo']:.4f}, {e['ci_hi']:.4f}]")
         rows.append(row)
-
     return header, rows
 
 
-def print_table1(header, rows):
-    col_w = [max(len(h), max(len(str(r[i]).split('\n')[0]) for r in rows))
+def print_table(header, rows, title=""):
+    if title:
+        print(f"\n{'='*70}\n{title}\n{'='*70}")
+    col_w = [max(len(h), max((len(str(r[i]).split('\n')[0])) for r in rows))
              for i, h in enumerate(header)]
     sep = "+" + "+".join("-" * (w + 2) for w in col_w) + "+"
 
     def fmt_row(cells, widths):
-        # multi-line cells: split on \n
-        lines_per_cell = [str(c).split("\n") for c in cells]
-        n_lines = max(len(l) for l in lines_per_cell)
+        lines = [str(c).split("\n") for c in cells]
+        n = max(len(l) for l in lines)
         out = []
-        for li in range(n_lines):
-            parts = []
-            for ci, lines in enumerate(lines_per_cell):
-                txt = lines[li] if li < len(lines) else ""
-                parts.append(f" {txt:<{widths[ci]}} ")
+        for li in range(n):
+            parts = [f" {(lines[ci][li] if li < len(lines[ci]) else ''):<{widths[ci]}} "
+                     for ci in range(len(widths))]
             out.append("|" + "|".join(parts) + "|")
         return "\n".join(out)
 
@@ -196,69 +266,78 @@ def print_table1(header, rows):
 def main():
     raw_df  = pd.read_csv(RAW_CSV)
     orig_df = pd.read_csv(ORIG_CSV)
+    print(f"Loaded {len(raw_df)} bootstrap replicates")
 
-    print(f"Loaded {len(raw_df)} bootstrap replicates from {RAW_CSV}")
-
-    # recompute λ = r/x in bootstrap distribution
-    boot_df = recompute_lambda_boot(raw_df)
-
-    # point estimates with new λ
+    # ── 1. Recompute lambda = r/x ──────────────────────────────────────────
+    boot_df   = recompute_lambda_boot(raw_df)
     point_est = build_point_estimates(orig_df)
 
-    # summary
+    # ── 2. Update bootstrap_summary.csv ────────────────────────────────────
     summary_df = build_summary(boot_df, point_est)
-
-    # overwrite bootstrap_summary.csv
     summary_df.to_csv(SUMM_CSV, index=False)
-    print(f"Updated {SUMM_CSV}  (λ = r/x with r = token price)")
+    print(f"Updated {SUMM_CSV}")
 
-    # save original_estimates.csv with updated lambda values
-    updated_orig_rows = []
+    # Update original_estimates.csv
+    updated_rows = []
     for noise in NOISE_TYPES:
-        pe = point_est.get(noise, {})
-        for param, val in pe.items():
-            updated_orig_rows.append({"noise": noise, "param": param, "estimate": round(val, 6)})
-    pd.DataFrame(updated_orig_rows).to_csv(ORIG_CSV, index=False)
-    print(f"Updated {ORIG_CSV}  (λ columns now = r/x)")
+        for param, val in point_est.get(noise, {}).items():
+            updated_rows.append({"noise": noise, "param": param,
+                                  "estimate": round(val, 6)})
+    pd.DataFrame(updated_rows).to_csv(ORIG_CSV, index=False)
+    print(f"Updated {ORIG_CSV}")
 
-    # Table 1
+    # ── 3. Pairwise tests ──────────────────────────────────────────────────
+    # Split boot_df by noise
+    boot_dfs = {n: boot_df[boot_df["noise"] == n].reset_index(drop=True)
+                for n in NOISE_TYPES}
+
+    within_df = pairwise_within_noise(boot_dfs, point_est)
+    within_df.to_csv(PAIR_MODEL, index=False)
+    print(f"Updated {PAIR_MODEL}  ({len(within_df)} rows)")
+
+    across_df = pairwise_across_noise(boot_dfs, point_est)
+    across_df.to_csv(PAIR_NOISE, index=False)
+    print(f"Updated {PAIR_NOISE}  ({len(across_df)} rows)")
+
+    # ── 4. Table 1 ─────────────────────────────────────────────────────────
     header, rows = format_table1(summary_df)
+    print_table(header, rows,
+                "TABLE 1 -- Estimated RI parameters (lambda = r/x, B=1000 bootstrap)")
 
-    print("\n" + "=" * 80)
-    print("TABLE 1  —  Estimated RI parameters  (λ = r/x,  r = input token price)")
-    print("           Bootstrap SE and 95% CI,  B = 1 000 replicates")
-    print("=" * 80)
-    print_table1(header, rows)
-
-    # save as CSV
-    table1_rows = []
+    # save table1.csv
+    t1_rows = []
     for row in rows:
         for ni, noise in enumerate(NOISE_TYPES):
-            param_label = row[0]
-            cell = row[ni + 1]
-            lines = cell.split("\n")
-            est_se = lines[0].strip()
-            ci     = lines[1].strip() if len(lines) > 1 else ""
-            table1_rows.append({
-                "parameter": param_label,
+            lines = row[ni + 1].split("\n")
+            t1_rows.append({
+                "parameter": row[0],
                 "noise":     NOISE_LABELS[noise],
-                "est_se":    est_se,
-                "ci_95":     ci,
+                "est_se":    lines[0].strip(),
+                "ci_95":     lines[1].strip() if len(lines) > 1 else "",
             })
-    pd.DataFrame(table1_rows).to_csv(OUT_TABLE1, index=False)
-    print(f"\nTable 1 saved to {OUT_TABLE1}")
+    pd.DataFrame(t1_rows).to_csv(OUT_TABLE1, index=False)
+    print(f"\nTable 1 -> {OUT_TABLE1}")
 
-    # quick sanity: print new vs old lambda for white noise
-    print("\nSanity check — White noise λ (new = r/x  vs  old = 1/x):")
-    for m in MODELS:
-        r   = summary_df[(summary_df["noise"] == "white") &
-                         (summary_df["param"] == f"lambda_{m}")]
-        new = r.iloc[0]["estimate"] if not r.empty else float("nan")
-        old_x_row = orig_df[orig_df["param"] == f"x_{m}"]
-        # orig_df was overwritten, look at point_est
-        x_val = point_est.get("white", {}).get(f"x_{m}", float("nan"))
-        old   = 1.0 / x_val if x_val > 0 else float("nan")
-        print(f"  {m:<28}  new λ={new:.4f}  (was 1/x={old:.4f},  price={PRICE_MAP[m]})")
+    # ── 5. Quick significance summary ──────────────────────────────────────
+    print("\n--- Appendix 1 significant pairs (within noise) ---")
+    sig1 = within_df[within_df["sig_ci"] | within_df["sig_z_0.05"]]
+    if sig1.empty:
+        print("  None")
+    else:
+        for _, r in sig1.iterrows():
+            print(f"  [{r['noise']}]  {r['model_A']} vs {r['model_B']}  "
+                  f"diff={r['obs_diff']:.4f}  p_z={r['p_z']:.4f}  "
+                  f"CI=[{r['ci_lo_diff']:.4f},{r['ci_hi_diff']:.4f}]")
+
+    print("\n--- Appendix 2 significant pairs (across noise) ---")
+    sig2 = across_df[across_df["sig_ci"] | across_df["sig_z_0.05"]]
+    if sig2.empty:
+        print("  None")
+    else:
+        for _, r in sig2.iterrows():
+            print(f"  {r['param']}  {r['noise_A']} vs {r['noise_B']}  "
+                  f"diff={r['obs_diff']:.4f}  p_z={r['p_z']:.4f}  "
+                  f"CI=[{r['ci_lo_diff']:.4f},{r['ci_hi_diff']:.4f}]")
 
 
 if __name__ == "__main__":

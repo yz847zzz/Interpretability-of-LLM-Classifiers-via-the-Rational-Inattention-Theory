@@ -444,8 +444,9 @@ def main():
         orig_res = fit_joint(datasets)
         orig_est = {}
         for i, label in enumerate(labels):
-            x = orig_res["x"][i]
-            orig_est[f"lambda_{label}"] = 1.0 / x if x > 0 else np.nan
+            x     = orig_res["x"][i]
+            price = PRICE_MAP.get(label, 1.0)
+            orig_est[f"lambda_{label}"] = price / x if x > 0 else np.nan
             orig_est[f"x_{label}"]      = x
         orig_est["alpha"] = orig_res["alpha"]
         orig_est["beta"]  = orig_res["beta"]
