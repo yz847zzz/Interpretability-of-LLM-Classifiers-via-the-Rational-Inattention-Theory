@@ -32,7 +32,8 @@ BASE        = "./Dataset/results"
 AUDIO_SUM   = f"{BASE}/bootstrap/bootstrap_summary.csv"
 AUDIO_MOD   = f"{BASE}/bootstrap/pairwise_model_tests.csv"
 AUDIO_CROSS = f"{BASE}/bootstrap/pairwise_tests.csv"
-OUT_PATH    = f"{BASE}/paper_report_v6.docx"
+OUT_PATH    = f"{BASE}/paper_report_v8.docx"
+PC_VS_R_FIG = f"{BASE}/pc_vs_r_snr6db.png"
 
 NOISE_ORDER  = ["white",  "babble",  "cafe"]
 NOISE_LABELS = {"white": "White Noise", "babble": "Babble Noise", "cafe": "Café Noise"}
@@ -468,27 +469,39 @@ def main():
 
     doc.add_paragraph()
 
-    # ── 4b-ii. Motivation for r = token price ─────────────────────────────
-    h(doc, "4b-ii. Why Input Token Price as Reward", 2)
+    # ── 4c. Pc vs Reward ──────────────────────────────────────────────────
+    h(doc, "4c. LLM Classification Accuracy vs Reward", 2)
     p(doc,
-      "In the RI model, r represents the value the agent gains from making a correct "
-      "decision. Here the LLM is the agent and the task is binary hate-speech detection. "
-      "Because all models receive the same prompt (input) and are constrained to a "
-      "single-digit JSON response (output ≤ 16 tokens), the only financial cost that "
-      "varies across models is the input token price. "
-      "This price is charged per call regardless of whether the answer is correct, "
-      "so it acts as a proxy for the opportunity cost of attention: a more expensive "
-      "model implicitly demands a higher reward to justify the same level of information "
-      "processing. "
-      "Setting r = input price ($/1M tokens) and keeping the directly fitted x, "
-      "the information cost λ = r / x directly reflects how much the model charges "
-      "per bit of decision-relevant information it processes.",
+      "Figure 2 plots the theoretical correct-action probability Pc as a function "
+      "of reward r for each LLM, evaluated at the fitted λ and at a fixed "
+      "noise level SNR = 6 dB (q ≈ 0.10, moderate noise). "
+      "For each LLM i with estimated λᵢ, varying r while holding λᵢ fixed gives "
+      "x(r) = r/λᵢ, and Pc(r) = Pc(q, x(r)) as defined in Section 2. "
+      "The filled dot on each curve marks the LLM's actual operating point at its "
+      "own API input price r = rᵢ; vertical dotted lines show these reference prices.",
+      size=10)
+
+    add_figure(doc, PC_VS_R_FIG, width=Inches(5.8),
+               caption=("Figure 2. Theoretical Pc vs reward r at fixed SNR = 6 dB (q ≈ 0.10). "
+                        "Curves are computed from the fitted extended RI model parameters "
+                        "(α, β averaged across noise types; λᵢ per LLM). "
+                        "Filled dots mark each LLM's actual API input price."))
+
+    p(doc,
+      "The ordering of curves reflects each LLM's information cost λ: an LLM with "
+      "lower λ reaches the same Pc at a smaller reward. "
+      "Gemini-2.5-Flash-Lite, which has the smallest estimated λ, achieves the steepest "
+      "accuracy gain per unit of reward, while GPT-3.5-turbo, with the largest λ, "
+      "requires a higher reward to attain the same accuracy level. "
+      "Each LLM is observed at its own market price, shown as the operating points; "
+      "the spread of these points across the curves illustrates how price-adjusted "
+      "information efficiency varies across LLMs.",
       size=10)
 
     doc.add_paragraph()
 
-    # ── 4c. Significance test summary ─────────────────────────────────────
-    h(doc, "4c. Significance Tests: Summary", 2)
+    # ── 4d. Significance test summary ─────────────────────────────────────
+    h(doc, "4d. Significance Tests: Summary", 2)
     p(doc,
       "All significance tests use the bootstrap CI of the difference "
       "(H₀ rejected at 5% level when 0 ∉ [2.5th, 97.5th percentile] of "
@@ -496,7 +509,7 @@ def main():
       size=10)
 
     # Within-noise summary
-    h(doc, "Between-model comparison (within noise type)", 3)
+    h(doc, "Between-LLM comparison (within noise type)", 3)
 
     for noise in NOISE_ORDER:
         sub = aud_mod[aud_mod["noise"] == noise]
@@ -518,14 +531,14 @@ def main():
                           f"higher than: {', '.join(gpt54_sig_others)}.")
 
         p(doc,
-          f"{NOISE_LABELS[noise]}:  {sig_n}/{tot} model pairs are significant "
+          f"{NOISE_LABELS[noise]}:  {sig_n}/{tot} LLM pairs are significant "
           f"by the CI test.{gpt54_note}",
           size=10)
 
     doc.add_paragraph()
 
     # Across-noise summary
-    h(doc, "Across-noise comparison (same model, different noise type)", 3)
+    h(doc, "Across-noise comparison (same LLM, different noise type)", 3)
 
     lam_cross = aud_cross[aud_cross["param"].str.startswith("lambda_")]
     ab_cross  = aud_cross[aud_cross["param"].isin(["alpha", "beta"])]
@@ -534,7 +547,7 @@ def main():
     p(doc,
       f"Lambda (λ):  {sig_lam}/{len(lam_cross)} cross-noise λ comparisons are "
       f"significant.  The information cost parameter is stable across white, babble, "
-      f"and café noise for all models — each LLM's decision efficiency does not change "
+      f"and café noise for all LLMs — each LLM's decision efficiency does not change "
       f"significantly as the type of acoustic noise changes.",
       size=10)
 

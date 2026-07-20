@@ -187,6 +187,101 @@ Dataset/results/ri_fit/all_models_fit.png      # all models overlaid
 
 ---
 
+## Data Pipeline
+
+The audio noise experiment introduces acoustic degradation through a three-stage pipeline that sits between the raw text corpus and LLM classification. Each stage is implemented in `pipeline/add_audio_noise.py`.
+
+![Data Pipeline](pipeline/PipelineDiagram.png)
+
+---
+
+### Stage 1 — Text-to-Speech (TTS)
+
+| Item | Detail |
+|---|---|
+| **Library** | [`edge-tts`](https://github.com/rany2/edge-tts) — async Python wrapper for Microsoft Edge / Azure Cognitive Services Neural TTS |
+| **Voice** | `en-US-GuyNeural` — English (US), male, Microsoft Azure Neural TTS |
+| **Output format** | MP3 (from Edge TTS) → decoded and resampled to **16 kHz mono WAV** via [PyAV](https://github.com/PyAV-Org/PyAV) (`av.AudioResampler`) |
+| **Concurrency** | 8 async workers (`asyncio.Semaphore`) |
+| **Reproducibility** | Each text produces a deterministic WAV (TTS output is deterministic for a fixed voice and text) |
+
+```bash
+python pipeline/add_audio_noise.py --step tts
+```
+
+Output: `Dataset/audio_original/{id}.wav` (200 files, one per source text)
+
+---
+
+### Stage 2 — Acoustic Noise Injection
+
+Noise is mixed with each clean WAV at controlled SNR levels using **RMS-power-normalised mixing**:
+
+```
+x_noisy = x_speech  +  gain × x_noise_segment
+```
+
+where `gain = RMS(speech) / (10^(SNR_dB/20)) / RMS(noise)`.
+
+The noise segment is randomly cropped from the noise file (seed = item index), ensuring reproducibility across runs.
+
+| Item | Detail |
+|---|---|
+| **SNR levels** | 21 levels: 40, 30, 20, 15, 10, 5, 4, 3, 2, 1, 0, −1, −2, −3, −5, −6, −7, −8, −10, −15, −20 dB (+ clean baseline = 22 total) |
+| **Sample rate** | 16 kHz mono throughout |
+| **White noise** | Synthetic i.i.d. Gaussian noise (NumPy `default_rng.standard_normal`, seed 42) |
+| **Babble noise** | [MUSAN corpus](https://www.openslr.org/17/) (Snyder et al., 2015) — 15 speech speakers overlaid to form multi-talker babble; streamed from OpenSLR 17 |
+| **Café noise** | [DEMAND dataset](https://zenodo.org/record/1227121) `CAFE_16k` recording (Thiemann et al., 2013) — real cafeteria ambience; from Zenodo 1227121 |
+
+```bash
+python pipeline/download_noise.py          # download noise files first
+python pipeline/add_audio_noise.py --step mix
+```
+
+Output: `Dataset/audio_noisy/{noise_type}/snr_{label}/{id}.wav`
+
+---
+
+### Stage 3 — Automatic Speech Recognition (ASR)
+
+| Item | Detail |
+|---|---|
+| **Library** | [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) — CTranslate2-optimised re-implementation of OpenAI Whisper (SYSTRAN) |
+| **Model** | `base` (Whisper Base — 74 M parameters, multilingual encoder-decoder Transformer) |
+| **Original model** | OpenAI Whisper (Radford et al., 2023, "Robust Speech Recognition via Large-Scale Weak Supervision") |
+| **Device** | CPU |
+| **Quantisation** | `int8` (8-bit weight quantisation via CTranslate2) |
+| **Decoding** | `beam_size=5`, forced `language="en"` |
+
+Each noisy WAV is transcribed to plain text; the result replaces the `text` column in the CSV and feeds directly into the LLM classification stage.
+
+```bash
+python pipeline/add_audio_noise.py --step asr
+```
+
+Output: `Dataset/text_with_audio_noisy/{noise_type}/hate_speech_{N}_{snr_label}.csv`
+
+---
+
+### Running the full audio pipeline
+
+```bash
+python pipeline/download_noise.py                      # ~400 MB, one-time
+python pipeline/add_audio_noise.py                     # all three stages
+# or run stages individually:
+python pipeline/add_audio_noise.py --step tts
+python pipeline/add_audio_noise.py --step mix --noise-type white babble cafe
+python pipeline/add_audio_noise.py --step asr  --noise-type white babble cafe
+```
+
+Install additional dependencies for the audio pipeline:
+
+```bash
+pip install edge-tts av torchaudio faster-whisper tqdm
+```
+
+---
+
 ## Output folder structure
 
 ```
